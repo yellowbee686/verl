@@ -923,6 +923,7 @@ class RayPPOTrainer(object):
                             print(f'Error in reward_fn: {e}')
                             reward_tensor = self.reward_fn(batch)
                             reward_extra_infos_dict = {}
+                        print(f'end reward_fn global_steps={self.global_steps}')
 
                         batch.batch['token_level_scores'] = reward_tensor
 

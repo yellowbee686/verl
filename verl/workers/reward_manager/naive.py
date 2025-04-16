@@ -73,6 +73,7 @@ class NaiveRewardManager:
                 ground_truth=ground_truth,
                 extra_info=extra_info,
             )
+            print(f'finish score i:{i} all:{len(data)}')
 
             if isinstance(score, dict):
                 reward = score["score"]
