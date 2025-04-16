@@ -515,10 +515,6 @@ class RayPPOTrainer(object):
         for test_data in self.val_dataloader:
             test_batch = DataProto.from_single_dict(test_data)
 
-            # repeat test batch
-            test_batch = test_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.val_kwargs.n,
-                                           interleave=True)
-
             # we only do validation on rule-based rm
             if self.config.reward_model.enable and test_batch[0].non_tensor_batch['reward_model']['style'] == 'model':
                 return {}
@@ -562,6 +558,9 @@ class RayPPOTrainer(object):
             output_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in output_ids]
             sample_outputs.extend(output_texts)
 
+            # repeat test batch
+            test_batch = test_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.val_kwargs.n,
+                                           interleave=True)
             test_batch = test_batch.union(test_output_gen_batch)
 
             # evaluate using reward_function
