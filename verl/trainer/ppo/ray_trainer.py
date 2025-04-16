@@ -16,6 +16,7 @@ FSDP PPO Trainer with Ray-based single controller.
 This trainer supports model-agonistic model initialization with huggingface
 """
 
+import time
 import os
 import uuid
 import warnings
@@ -848,10 +849,12 @@ class RayPPOTrainer(object):
 
                 with _timer('step', timing_raw):
                     # generate a batch
+                    start_time = time.time()
                     print(f'start rollout global_steps={self.global_steps}')
                     with _timer('gen', timing_raw):
                         gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
-                        print(f'end rollout global_steps={self.global_steps}')
+                    end_rollout_time = time.time()
+                    print(f'end rollout global_steps={self.global_steps} time={end_rollout_time - start_time}')
 
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
                         with _timer('gen_max', timing_raw):
@@ -881,7 +884,8 @@ class RayPPOTrainer(object):
                     # Please take care when you implement group based adv computation such as GRPO and rloo
                     if self.config.trainer.balance_batch:
                         self._balance_batch(batch, metrics=metrics)
-                    print(f'end balance_batch global_steps={self.global_steps}')
+                    end_balance_batch_time = time.time()
+                    print(f'end balance_batch global_steps={self.global_steps} time={end_balance_batch_time - end_rollout_time}')
 
                     # compute global_valid tokens
                     batch.meta_info['global_token_num'] = torch.sum(batch.batch['attention_mask'], dim=-1).tolist()
@@ -896,7 +900,8 @@ class RayPPOTrainer(object):
                         with _timer('ref', timing_raw):
                             ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
                             batch = batch.union(ref_log_prob)
-                    print(f'end ref_log_prob global_steps={self.global_steps}')
+                    end_ref_log_prob_time = time.time()
+                    print(f'end ref_log_prob global_steps={self.global_steps} time={end_ref_log_prob_time - end_balance_batch_time}')
 
                     # compute values
                     if self.use_critic:
@@ -923,7 +928,8 @@ class RayPPOTrainer(object):
                             print(f'Error in reward_fn: {e}')
                             reward_tensor = self.reward_fn(batch)
                             reward_extra_infos_dict = {}
-                        print(f'end reward_fn global_steps={self.global_steps}')
+                        end_reward_fn_time = time.time()
+                        print(f'end reward_fn global_steps={self.global_steps} time={end_reward_fn_time - end_ref_log_prob_time}')
 
                         batch.batch['token_level_scores'] = reward_tensor
 
@@ -946,7 +952,8 @@ class RayPPOTrainer(object):
                                                   gamma=self.config.algorithm.gamma,
                                                   lam=self.config.algorithm.lam,
                                                   num_repeat=self.config.actor_rollout_ref.rollout.n)
-                        print(f'end compute_advantage global_steps={self.global_steps}')
+                        end_compute_advantage_time = time.time()
+                        print(f'end compute_advantage global_steps={self.global_steps} time={end_compute_advantage_time - end_reward_fn_time}')
                     # update critic
                     if self.use_critic:
                         with _timer('update_critic', timing_raw):
@@ -958,9 +965,9 @@ class RayPPOTrainer(object):
                     if self.config.trainer.critic_warmup <= self.global_steps:
                         # update actor
                         with _timer('update_actor', timing_raw):
-                            pprint(f'start update_actor global_steps={self.global_steps}')
                             actor_output = self.actor_rollout_wg.update_actor(batch)
-                            pprint(f'end update_actor global_steps={self.global_steps}')
+                        end_update_actor_time = time.time()
+                        print(f'end update_actor global_steps={self.global_steps} time={end_update_actor_time - end_compute_advantage_time}')
                         actor_output_metrics = reduce_metrics(actor_output.meta_info['metrics'])
                         metrics.update(actor_output_metrics)
 
@@ -968,9 +975,10 @@ class RayPPOTrainer(object):
                     if self.val_reward_fn is not None and self.config.trainer.test_freq > 0 and \
                         (is_last_step or  self.global_steps % self.config.trainer.test_freq == 0):
                         with _timer('testing', timing_raw):
-                            pprint(f'start validate global_steps={self.global_steps}')
+                            start_validate_time = time.time()
                             val_metrics: dict = self._validate()
-                            pprint(f'end validate global_steps={self.global_steps}')
+                            end_validate_time = time.time()
+                            print(f'end validate global_steps={self.global_steps} time={end_validate_time - end_update_actor_time}')
                             if is_last_step:
                                 last_val_metrics = val_metrics
                         metrics.update(val_metrics)
@@ -994,6 +1002,5 @@ class RayPPOTrainer(object):
                     pprint(f'Final validation metrics: {last_val_metrics}')
                     progress_bar.close()
                     return
-                print(f'update progress_bar global_steps={self.global_steps}')
                 progress_bar.update(1)
                 self.global_steps += 1
