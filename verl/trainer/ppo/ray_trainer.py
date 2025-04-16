@@ -848,10 +848,10 @@ class RayPPOTrainer(object):
 
                 with _timer('step', timing_raw):
                     # generate a batch
-                    pprint(f'start rollout global_steps={self.global_steps}')
+                    print(f'start rollout global_steps={self.global_steps}')
                     with _timer('gen', timing_raw):
                         gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
-                        pprint(f'end rollout global_steps={self.global_steps}')
+                        print(f'end rollout global_steps={self.global_steps}')
 
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
                         with _timer('gen_max', timing_raw):
@@ -881,7 +881,7 @@ class RayPPOTrainer(object):
                     # Please take care when you implement group based adv computation such as GRPO and rloo
                     if self.config.trainer.balance_batch:
                         self._balance_batch(batch, metrics=metrics)
-                    pprint(f'end balance_batch global_steps={self.global_steps}')
+                    print(f'end balance_batch global_steps={self.global_steps}')
 
                     # compute global_valid tokens
                     batch.meta_info['global_token_num'] = torch.sum(batch.batch['attention_mask'], dim=-1).tolist()
@@ -896,7 +896,7 @@ class RayPPOTrainer(object):
                         with _timer('ref', timing_raw):
                             ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
                             batch = batch.union(ref_log_prob)
-                    pprint(f'end ref_log_prob global_steps={self.global_steps}')
+                    print(f'end ref_log_prob global_steps={self.global_steps}')
 
                     # compute values
                     if self.use_critic:
@@ -926,7 +926,7 @@ class RayPPOTrainer(object):
 
                         batch.batch['token_level_scores'] = reward_tensor
 
-                        pprint(f'{list(reward_extra_infos_dict.keys())=}')
+                        print(f'{list(reward_extra_infos_dict.keys())=}')
                         if reward_extra_infos_dict:
                             batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
 
@@ -945,7 +945,7 @@ class RayPPOTrainer(object):
                                                   gamma=self.config.algorithm.gamma,
                                                   lam=self.config.algorithm.lam,
                                                   num_repeat=self.config.actor_rollout_ref.rollout.n)
-                        pprint(f'end compute_advantage global_steps={self.global_steps}')
+                        print(f'end compute_advantage global_steps={self.global_steps}')
                     # update critic
                     if self.use_critic:
                         with _timer('update_critic', timing_raw):
@@ -993,6 +993,6 @@ class RayPPOTrainer(object):
                     pprint(f'Final validation metrics: {last_val_metrics}')
                     progress_bar.close()
                     return
-                pprint(f'update progress_bar global_steps={self.global_steps}')
+                print(f'update progress_bar global_steps={self.global_steps}')
                 progress_bar.update(1)
                 self.global_steps += 1
