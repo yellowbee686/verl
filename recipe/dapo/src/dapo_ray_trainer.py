@@ -96,6 +96,7 @@ class RayDAPOTrainer(RayPPOTrainer):
 
                 with _timer('step', timing_raw):
                     # generate a batch
+                    pprint(f'start rollout global_steps={self.global_steps}')
                     with _timer('gen', timing_raw):
                         gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
 
@@ -143,7 +144,7 @@ class RayDAPOTrainer(RayPPOTrainer):
 
                         new_batch.batch['token_level_scores'] = reward_tensor
 
-                        print(f'{list(reward_extra_infos_dict.keys())=}')
+                        pprint(f'{list(reward_extra_infos_dict.keys())=}')
                         if reward_extra_infos_dict:
                             new_batch.non_tensor_batch.update({
                                 k: np.array(v) for k, v in reward_extra_infos_dict.items()
