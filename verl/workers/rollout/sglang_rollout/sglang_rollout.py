@@ -94,6 +94,7 @@ class SGLangRollout(BaseRollout):
         tokenizer,
         model_hf_config,
         dist_timeout: Optional[int] = 7200,  # 默认2小时超时（秒）
+        nccl_timeout_ms: Optional[int] = 7200000,  # 默认2小时超时
         **kwargs,
     ):
         """A SGLang rollout. It requires the module is supported by the SGLang.
@@ -104,10 +105,30 @@ class SGLangRollout(BaseRollout):
             tokenizer: the task/model tokenizer
             model_hf_config: the huggingface config to initiallize the generating model in SGLang
             dist_timeout: timeout in seconds for distributed communication (default: 7200, 2 hours)
+            nccl_timeout_ms: timeout in milliseconds for NCCL operations (default: 7200000, 2 hours)
             **kwargs: train_tp, for Megatron Backend to initialize hybrid engine (zero redundancy) process group
         """
         super().__init__()
         self.config = config
+
+        # Set NCCL timeout if provided (默认为2小时，7200000毫秒)
+        if nccl_timeout_ms is not None:
+            # 设置环境变量以增加NCCL超时
+            os.environ["NCCL_BLOCKING_WAIT"] = "1"
+            os.environ["NCCL_ASYNC_ERROR_HANDLING"] = "1"
+            os.environ["NCCL_SOCKET_NTHREADS"] = "1" 
+            
+            # 不强制指定网络接口，因为不同环境的接口名称可能不同
+            # os.environ["NCCL_SOCKET_IFNAME"] = "eth0"
+            
+            # 设置NCCL超时时间（秒为单位）
+            os.environ["NCCL_IB_TIMEOUT"] = str(nccl_timeout_ms // 1000)
+            os.environ["NCCL_IB_SL"] = "0"  # 提高故障避免级别
+            os.environ["NCCL_SOCKET_IFNAME"] = os.environ.get("NCCL_SOCKET_IFNAME", "")  # 保留现有设置
+            
+            # 设置PyTorch分布式通信的默认超时值
+            torch.distributed._DEFAULT_TIMEOUT = datetime.timedelta(milliseconds=nccl_timeout_ms)
+            print(f"Set NCCL timeout to {nccl_timeout_ms} ms")
 
         assert not (not config.enforce_eager and
                     config.free_cache_engine), "disable CUDA graph (enforce_eager = False) if free cache engine"
@@ -150,23 +171,23 @@ class SGLangRollout(BaseRollout):
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(sorted(list(visible_devices_set)))
 
         nnodes = -(-tp_size // len(visible_devices_set))
+
+        server_args = ServerArgs(model_path=actor_module, nnodes=nnodes)
+        ip, port_args = get_ip(), PortArgs.init_new(server_args)
         
         # 设置timeout参数（秒）
         timeout_seconds = dist_timeout if dist_timeout is not None else 1800  # 默认30分钟
         
-        # 创建ServerArgs，确保dist_timeout参数被正确传递
-        server_args = ServerArgs(
-            model_path=actor_module, 
-            nnodes=nnodes,
-            dist_timeout=timeout_seconds
-        )
-        
-        ip, port_args = get_ip(), PortArgs.init_new(server_args)
+        # Get timeout for broadcast operation
+        timeout = None
+        if hasattr(torch.distributed, "_DEFAULT_TIMEOUT"):
+            timeout = torch.distributed._DEFAULT_TIMEOUT
         
         [ip, port_args] = broadcast_pyobj([ip, port_args],
                                           rank=tp_rank,
                                           dist_group=device_mesh_cpu.get_group("tp"),
-                                          src=device_mesh_cpu["tp"].mesh[0].item())
+                                          src=device_mesh_cpu["tp"].mesh[0].item(),
+                                          timeout=timeout)
         dist_init_addr = f"{ip}:{port_args.nccl_port}"
         load_format = 'dummy' if config.load_format.startswith('dummy') else config.load_format
         self.inference_engine = VerlEngine(
