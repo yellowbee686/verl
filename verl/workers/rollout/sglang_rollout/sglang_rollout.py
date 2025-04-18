@@ -312,14 +312,15 @@ class SGLangRollout(BaseRollout):
         if response.shape[1] < self.config.response_length:
             response = pad_sequence_to_length(response, self.config.response_length, self.pad_token_id)
             # log_probs = pad_sequence_to_length(log_probs, self.config.response_length, self.pad_token_id)
-        if self.sampling_params.n > 1 and do_sample:
-            idx = idx.repeat_interleave(self.sampling_params.n, dim=0)
-            attention_mask = attention_mask.repeat_interleave(self.sampling_params.n, dim=0)
-            position_ids = position_ids.repeat_interleave(self.sampling_params.n, dim=0)
-            batch_size = batch_size * self.sampling_params.n
+        sample_n = self.sampling_params['n']
+        if sample_n > 1 and do_sample:
+            idx = idx.repeat_interleave(sample_n, dim=0)
+            attention_mask = attention_mask.repeat_interleave(sample_n, dim=0)
+            position_ids = position_ids.repeat_interleave(sample_n, dim=0)
+            batch_size = batch_size * sample_n
             if 'multi_modal_inputs' in non_tensor_batch:
                 non_tensor_batch['multi_modal_inputs'] = np.repeat(non_tensor_batch['multi_modal_inputs'],
-                                                                   self.sampling_params.n,
+                                                                   sample_n,
                                                                    axis=0)
         seq = torch.cat([idx, response], dim=-1)
 
