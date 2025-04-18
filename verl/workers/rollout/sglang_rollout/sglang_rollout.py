@@ -293,8 +293,7 @@ class SGLangRollout(BaseRollout):
             )
         is_validate = prompts.meta_info.get('validate', False)
         if is_validate:
-            self.config.n = 1 # if validate, already repeat in ray_trainer
-            kwargs['n'] = 1
+            kwargs['n'] = 1 # if validate, already repeat in ray_trainer
         # users can customize different sampling_params at different run
         with self.update_sampling_params(**kwargs):
             print(f"{self.sampling_params=}")
@@ -313,14 +312,14 @@ class SGLangRollout(BaseRollout):
         if response.shape[1] < self.config.response_length:
             response = pad_sequence_to_length(response, self.config.response_length, self.pad_token_id)
             # log_probs = pad_sequence_to_length(log_probs, self.config.response_length, self.pad_token_id)
-        if self.config.n > 1 and do_sample:
-            idx = idx.repeat_interleave(self.config.n, dim=0)
-            attention_mask = attention_mask.repeat_interleave(self.config.n, dim=0)
-            position_ids = position_ids.repeat_interleave(self.config.n, dim=0)
-            batch_size = batch_size * self.config.n
+        if self.sampling_params.n > 1 and do_sample:
+            idx = idx.repeat_interleave(self.sampling_params.n, dim=0)
+            attention_mask = attention_mask.repeat_interleave(self.sampling_params.n, dim=0)
+            position_ids = position_ids.repeat_interleave(self.sampling_params.n, dim=0)
+            batch_size = batch_size * self.sampling_params.n
             if 'multi_modal_inputs' in non_tensor_batch:
                 non_tensor_batch['multi_modal_inputs'] = np.repeat(non_tensor_batch['multi_modal_inputs'],
-                                                                   self.config.n,
+                                                                   self.sampling_params.n,
                                                                    axis=0)
         seq = torch.cat([idx, response], dim=-1)
 
