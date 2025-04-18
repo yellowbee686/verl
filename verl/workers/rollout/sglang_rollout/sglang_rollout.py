@@ -150,12 +150,18 @@ class SGLangRollout(BaseRollout):
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(sorted(list(visible_devices_set)))
 
         nnodes = -(-tp_size // len(visible_devices_set))
-        server_args = ServerArgs(model_path=actor_module, nnodes=nnodes)
-        ip, port_args = get_ip(), PortArgs.init_new(server_args)
         
-        # 设置timeout参数
+        # 设置timeout参数（秒）
         timeout_seconds = dist_timeout if dist_timeout is not None else 1800  # 默认30分钟
-        timeout = datetime.timedelta(seconds=timeout_seconds)
+        
+        # 创建ServerArgs，确保dist_timeout参数被正确传递
+        server_args = ServerArgs(
+            model_path=actor_module, 
+            nnodes=nnodes,
+            dist_timeout=timeout_seconds
+        )
+        
+        ip, port_args = get_ip(), PortArgs.init_new(server_args)
         
         [ip, port_args] = broadcast_pyobj([ip, port_args],
                                           rank=tp_rank,
@@ -174,7 +180,7 @@ class SGLangRollout(BaseRollout):
             load_format=load_format,
             dist_init_addr=dist_init_addr,
             nnodes=nnodes,
-            dist_timeout=timeout_seconds,
+            dist_timeout=timeout_seconds,  # 显式传递timeout参数
             # NOTE(Chenyang): if you want to debug the sglang engine
             # please set the following parameters
             # Otherwise, it will make the engine run too slow
