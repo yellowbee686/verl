@@ -293,7 +293,8 @@ class SGLangRollout(BaseRollout):
             )
         is_validate = prompts.meta_info.get('validate', False)
         if is_validate:
-            kwargs['n'] = 1 # if validate, already repeat in ray_trainer
+            self.config.n = 1 # if validate, already repeat in ray_trainer
+            kwargs['n'] = 1
         # users can customize different sampling_params at different run
         with self.update_sampling_params(**kwargs):
             print(f"{self.sampling_params=}")
