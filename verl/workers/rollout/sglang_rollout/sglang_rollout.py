@@ -304,25 +304,25 @@ class SGLangRollout(BaseRollout):
                 input_ids=idx_list,
                 image_data=image_list)
 
-        out = _post_process_outputs(self.tokenizer, output)
+            out = _post_process_outputs(self.tokenizer, output)
 
-        response = out[0].to(idx.device)
-        # log_probs = out[1].to(idx.device)
+            response = out[0].to(idx.device)
+            # log_probs = out[1].to(idx.device)
 
-        if response.shape[1] < self.config.response_length:
-            response = pad_sequence_to_length(response, self.config.response_length, self.pad_token_id)
-            # log_probs = pad_sequence_to_length(log_probs, self.config.response_length, self.pad_token_id)
-        sample_n = self.sampling_params['n']
-        if sample_n > 1 and do_sample:
-            idx = idx.repeat_interleave(sample_n, dim=0)
-            attention_mask = attention_mask.repeat_interleave(sample_n, dim=0)
-            position_ids = position_ids.repeat_interleave(sample_n, dim=0)
-            batch_size = batch_size * sample_n
-            if 'multi_modal_inputs' in non_tensor_batch:
-                non_tensor_batch['multi_modal_inputs'] = np.repeat(non_tensor_batch['multi_modal_inputs'],
-                                                                   sample_n,
-                                                                   axis=0)
-        seq = torch.cat([idx, response], dim=-1)
+            if response.shape[1] < self.config.response_length:
+                response = pad_sequence_to_length(response, self.config.response_length, self.pad_token_id)
+                # log_probs = pad_sequence_to_length(log_probs, self.config.response_length, self.pad_token_id)
+            sample_n = self.sampling_params['n']
+            if sample_n > 1 and do_sample:
+                idx = idx.repeat_interleave(sample_n, dim=0)
+                attention_mask = attention_mask.repeat_interleave(sample_n, dim=0)
+                position_ids = position_ids.repeat_interleave(sample_n, dim=0)
+                batch_size = batch_size * sample_n
+                if 'multi_modal_inputs' in non_tensor_batch:
+                    non_tensor_batch['multi_modal_inputs'] = np.repeat(non_tensor_batch['multi_modal_inputs'],
+                                                                    sample_n,
+                                                                    axis=0)
+            seq = torch.cat([idx, response], dim=-1)
 
         response_length = response.size(1)
         delta_position_id = torch.arange(1, response_length + 1, device=position_ids.device)
