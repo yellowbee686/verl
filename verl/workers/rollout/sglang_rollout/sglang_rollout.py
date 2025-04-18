@@ -93,7 +93,7 @@ class SGLangRollout(BaseRollout):
         config: DictConfig,
         tokenizer,
         model_hf_config,
-        dist_timeout: Optional[int] = 7200,  # 默认2小时超时（秒）
+        dist_timeout: int = 7200,  # 默认2小时超时（秒）
         **kwargs,
     ):
         """A SGLang rollout. It requires the module is supported by the SGLang.
@@ -110,26 +110,18 @@ class SGLangRollout(BaseRollout):
         super().__init__()
         self.config = config
 
-        # Set NCCL timeout if provided (默认为2小时，7200000毫秒)
         # Use dist_timeout (seconds) for all timeout settings
-        timeout_seconds = dist_timeout if dist_timeout is not None else 7200
-        timeout_duration = datetime.timedelta(seconds=timeout_seconds)
-
-        print(f"Using distributed timeout: {timeout_duration} ({timeout_seconds} seconds)")
+        nccl_timeout_ms = str(dist_timeout * 1000)
 
         # Set NCCL environment variables (potentially helpful for stability)
         os.environ["NCCL_BLOCKING_WAIT"] = "1"
         os.environ["NCCL_ASYNC_ERROR_HANDLING"] = "1"
         os.environ["NCCL_SOCKET_NTHREADS"] = "1"
         # Setting NCCL_IB_TIMEOUT might also be beneficial if IB is used
-        os.environ["NCCL_IB_TIMEOUT"] = str(timeout_seconds) # Use seconds here
+        os.environ["NCCL_IB_TIMEOUT"] = nccl_timeout_ms # Use seconds here
+        os.environ["NCCL_TIMEOUT"] = nccl_timeout_ms
         os.environ["NCCL_IB_SL"] = "0"
         os.environ["NCCL_SOCKET_IFNAME"] = os.environ.get("NCCL_SOCKET_IFNAME", "")
-
-        # Set PyTorch distributed default timeout *EARLY*
-        # This should ideally affect process groups created later if they don't have an explicit timeout
-        torch.distributed._DEFAULT_TIMEOUT = timeout_duration
-        print(f"Set torch.distributed._DEFAULT_TIMEOUT to {timeout_duration}")
 
 
         assert not (not config.enforce_eager and
@@ -299,6 +291,9 @@ class SGLangRollout(BaseRollout):
                 skip_special_tokens=True,
                 spaces_between_special_tokens=True,
             )
+        is_validate = prompts.meta_info.get('validate', False)
+        if is_validate:
+            kwargs['n'] = 1 # if validate, already repeat in ray_trainer
         # users can customize different sampling_params at different run
         with self.update_sampling_params(**kwargs):
             print(f"{self.sampling_params=}")
