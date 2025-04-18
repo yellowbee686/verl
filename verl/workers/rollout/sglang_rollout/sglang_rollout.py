@@ -128,11 +128,8 @@ class SGLangRollout(BaseRollout):
 
         # Set PyTorch distributed default timeout *EARLY*
         # This should ideally affect process groups created later if they don't have an explicit timeout
-        if hasattr(torch.distributed, "_DEFAULT_TIMEOUT"):
-            torch.distributed._DEFAULT_TIMEOUT = timeout_duration
-            print(f"Set torch.distributed._DEFAULT_TIMEOUT to {timeout_duration}")
-        else:
-            print("Warning: torch.distributed._DEFAULT_TIMEOUT attribute not found. Cannot set default timeout.")
+        torch.distributed._DEFAULT_TIMEOUT = timeout_duration
+        print(f"Set torch.distributed._DEFAULT_TIMEOUT to {timeout_duration}")
 
 
         assert not (not config.enforce_eager and
