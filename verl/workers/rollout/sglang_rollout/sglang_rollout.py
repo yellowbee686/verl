@@ -29,6 +29,7 @@ from __future__ import annotations
 import os
 import numpy as np
 import datetime
+import torch.distributed
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, List, Optional
 from omegaconf import DictConfig
@@ -40,7 +41,6 @@ from sglang.srt.entrypoints.verl_engine import VerlEngine
 from torch.distributed.device_mesh import init_device_mesh
 from sglang.srt.sampling.sampling_params import SamplingParams
 from verl.third_party.sglang import parallel_state as sglang_ps
-import torch.distributed
 from torch.nn.utils.rnn import pad_sequence
 from sglang.srt.utils import broadcast_pyobj, get_ip
 from sglang.srt.server_args import PortArgs, ServerArgs
@@ -94,7 +94,6 @@ class SGLangRollout(BaseRollout):
         tokenizer,
         model_hf_config,
         dist_timeout: Optional[int] = 7200,  # 默认2小时超时（秒）
-        nccl_timeout_ms: Optional[int] = 7200000,  # 默认2小时超时
         **kwargs,
     ):
         """A SGLang rollout. It requires the module is supported by the SGLang.
@@ -112,23 +111,29 @@ class SGLangRollout(BaseRollout):
         self.config = config
 
         # Set NCCL timeout if provided (默认为2小时，7200000毫秒)
-        if nccl_timeout_ms is not None:
-            # 设置环境变量以增加NCCL超时
-            os.environ["NCCL_BLOCKING_WAIT"] = "1"
-            os.environ["NCCL_ASYNC_ERROR_HANDLING"] = "1"
-            os.environ["NCCL_SOCKET_NTHREADS"] = "1" 
-            
-            # 不强制指定网络接口，因为不同环境的接口名称可能不同
-            # os.environ["NCCL_SOCKET_IFNAME"] = "eth0"
-            
-            # 设置NCCL超时时间（秒为单位）
-            os.environ["NCCL_IB_TIMEOUT"] = str(nccl_timeout_ms // 1000)
-            os.environ["NCCL_IB_SL"] = "0"  # 提高故障避免级别
-            os.environ["NCCL_SOCKET_IFNAME"] = os.environ.get("NCCL_SOCKET_IFNAME", "")  # 保留现有设置
-            
-            # 设置PyTorch分布式通信的默认超时值
-            torch.distributed._DEFAULT_TIMEOUT = datetime.timedelta(milliseconds=nccl_timeout_ms)
-            print(f"Set NCCL timeout to {nccl_timeout_ms} ms")
+        # Use dist_timeout (seconds) for all timeout settings
+        timeout_seconds = dist_timeout if dist_timeout is not None else 7200
+        timeout_duration = datetime.timedelta(seconds=timeout_seconds)
+
+        print(f"Using distributed timeout: {timeout_duration} ({timeout_seconds} seconds)")
+
+        # Set NCCL environment variables (potentially helpful for stability)
+        os.environ["NCCL_BLOCKING_WAIT"] = "1"
+        os.environ["NCCL_ASYNC_ERROR_HANDLING"] = "1"
+        os.environ["NCCL_SOCKET_NTHREADS"] = "1"
+        # Setting NCCL_IB_TIMEOUT might also be beneficial if IB is used
+        os.environ["NCCL_IB_TIMEOUT"] = str(timeout_seconds) # Use seconds here
+        os.environ["NCCL_IB_SL"] = "0"
+        os.environ["NCCL_SOCKET_IFNAME"] = os.environ.get("NCCL_SOCKET_IFNAME", "")
+
+        # Set PyTorch distributed default timeout *EARLY*
+        # This should ideally affect process groups created later if they don't have an explicit timeout
+        if hasattr(torch.distributed, "_DEFAULT_TIMEOUT"):
+            torch.distributed._DEFAULT_TIMEOUT = timeout_duration
+            print(f"Set torch.distributed._DEFAULT_TIMEOUT to {timeout_duration}")
+        else:
+            print("Warning: torch.distributed._DEFAULT_TIMEOUT attribute not found. Cannot set default timeout.")
+
 
         assert not (not config.enforce_eager and
                     config.free_cache_engine), "disable CUDA graph (enforce_eager = False) if free cache engine"
@@ -175,19 +180,10 @@ class SGLangRollout(BaseRollout):
         server_args = ServerArgs(model_path=actor_module, nnodes=nnodes)
         ip, port_args = get_ip(), PortArgs.init_new(server_args)
         
-        # 设置timeout参数（秒）
-        timeout_seconds = dist_timeout if dist_timeout is not None else 1800  # 默认30分钟
-        
-        # Get timeout for broadcast operation
-        timeout = None
-        if hasattr(torch.distributed, "_DEFAULT_TIMEOUT"):
-            timeout = torch.distributed._DEFAULT_TIMEOUT
-        
         [ip, port_args] = broadcast_pyobj([ip, port_args],
                                           rank=tp_rank,
                                           dist_group=device_mesh_cpu.get_group("tp"),
-                                          src=device_mesh_cpu["tp"].mesh[0].item(),
-                                          timeout=timeout)
+                                          src=device_mesh_cpu["tp"].mesh[0].item())
         dist_init_addr = f"{ip}:{port_args.nccl_port}"
         load_format = 'dummy' if config.load_format.startswith('dummy') else config.load_format
         self.inference_engine = VerlEngine(
@@ -201,7 +197,6 @@ class SGLangRollout(BaseRollout):
             load_format=load_format,
             dist_init_addr=dist_init_addr,
             nnodes=nnodes,
-            dist_timeout=timeout_seconds,  # 显式传递timeout参数
             # NOTE(Chenyang): if you want to debug the sglang engine
             # please set the following parameters
             # Otherwise, it will make the engine run too slow
