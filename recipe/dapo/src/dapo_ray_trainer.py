@@ -228,7 +228,7 @@ class RayDAPOTrainer(RayPPOTrainer):
                             # Align the batch
                             print(f"before align: {num_prompt_in_batch=}")
                             traj_bsz = self.config.data.train_batch_size * self.config.actor_rollout_ref.rollout.n
-                            batch = batch[:traj_bsz]
+                            # batch = batch[:traj_bsz]
 
                     # balance the number of valid tokens on each dp rank.
                     # Note that this breaks the order of data inside the batch.
