@@ -226,6 +226,7 @@ class RayDAPOTrainer(RayPPOTrainer):
                                 )
                         else:
                             # Align the batch
+                            print(f"before align: {num_prompt_in_batch=}")
                             traj_bsz = self.config.data.train_batch_size * self.config.actor_rollout_ref.rollout.n
                             batch = batch[:traj_bsz]
 
