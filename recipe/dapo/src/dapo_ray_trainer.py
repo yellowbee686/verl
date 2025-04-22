@@ -233,7 +233,8 @@ class RayDAPOTrainer(RayPPOTrainer):
                         else:
                             # Align the batch
                             print(f"before align: {num_prompt_in_batch=} {all_right_count=} {all_wrong_count=} train_bs:{self.config.data.train_batch_size}")
-                            traj_bsz = self.config.data.train_batch_size * self.config.actor_rollout_ref.rollout.n
+                            rollout_n = self.config.actor_rollout_ref.rollout.n
+                            traj_bsz = self.config.data.train_batch_size * rollout_n
                             if self.config.algorithm.filter_groups.truncate_sample:
                                 print(f"truncate batch to train_bs")
                                 batch = batch[:traj_bsz]
@@ -241,8 +242,8 @@ class RayDAPOTrainer(RayPPOTrainer):
                                 # batch is tensorDict, it's split will round up
                                 # Make traj_bsz a multiple of ppo_mini_batch_size by rounding down
                                 # to avoid the last batch is too small, adjust the batch size
-                                current_bsz = num_prompt_in_batch * self.config.actor_rollout_ref.rollout.n
-                                ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
+                                current_bsz = num_prompt_in_batch * rollout_n
+                                ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size * rollout_n
                                 adjusted_traj_bsz = (current_bsz // ppo_mini_batch_size) * ppo_mini_batch_size
                                 print(f"Adjusting batch size from {current_bsz} to {adjusted_traj_bsz} to be a multiple of ppo_mini_batch_size={ppo_mini_batch_size}")
                                 batch = batch[:adjusted_traj_bsz]
