@@ -237,6 +237,16 @@ class RayDAPOTrainer(RayPPOTrainer):
                             if self.config.algorithm.filter_groups.truncate_sample:
                                 print(f"truncate batch to train_bs")
                                 batch = batch[:traj_bsz]
+                            else:
+                                # batch is tensorDict, it's split will round up
+                                # Make traj_bsz a multiple of ppo_mini_batch_size by rounding down
+                                # to avoid the last batch is too small, adjust the batch size
+                                ppo_mini_batch_size = self.config.actor.ppo_mini_batch_size
+                                adjusted_traj_bsz = (traj_bsz // ppo_mini_batch_size) * ppo_mini_batch_size
+                                print(f"Adjusting batch size from {traj_bsz} to {adjusted_traj_bsz} to be a multiple of ppo_mini_batch_size={ppo_mini_batch_size}")
+                                batch = batch[:adjusted_traj_bsz]
+                                
+
 
                     # balance the number of valid tokens on each dp rank.
                     # Note that this breaks the order of data inside the batch.
