@@ -241,9 +241,10 @@ class RayDAPOTrainer(RayPPOTrainer):
                                 # batch is tensorDict, it's split will round up
                                 # Make traj_bsz a multiple of ppo_mini_batch_size by rounding down
                                 # to avoid the last batch is too small, adjust the batch size
+                                current_bsz = num_prompt_in_batch * self.config.actor_rollout_ref.rollout.n
                                 ppo_mini_batch_size = self.config.actor.ppo_mini_batch_size
-                                adjusted_traj_bsz = (traj_bsz // ppo_mini_batch_size) * ppo_mini_batch_size
-                                print(f"Adjusting batch size from {traj_bsz} to {adjusted_traj_bsz} to be a multiple of ppo_mini_batch_size={ppo_mini_batch_size}")
+                                adjusted_traj_bsz = (current_bsz // ppo_mini_batch_size) * ppo_mini_batch_size
+                                print(f"Adjusting batch size from {current_bsz} to {adjusted_traj_bsz} to be a multiple of ppo_mini_batch_size={ppo_mini_batch_size}")
                                 batch = batch[:adjusted_traj_bsz]
                                 
 
