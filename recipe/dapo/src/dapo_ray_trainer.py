@@ -193,8 +193,14 @@ class RayDAPOTrainer(RayPPOTrainer):
                             prompt_uid2metric_vals[uid].append(metric_val)
 
                         prompt_uid2metric_std = {}
+                        all_right_count = 0
+                        all_wrong_count = 0
                         for prompt_uid, metric_vals in prompt_uid2metric_vals.items():
                             prompt_uid2metric_std[prompt_uid] = np.std(metric_vals)
+                            if all(val == 1 for val in metric_vals):
+                                all_right_count += 1
+                            elif all(val == 0 for val in metric_vals):
+                                all_wrong_count += 1
 
                         kept_prompt_uids = [
                             uid
@@ -226,9 +232,10 @@ class RayDAPOTrainer(RayPPOTrainer):
                                 )
                         else:
                             # Align the batch
-                            print(f"before align: {num_prompt_in_batch=}")
+                            print(f"before align: {num_prompt_in_batch=} {all_right_count=} {all_wrong_count=} train_bs:{self.config.data.train_batch_size}")
                             traj_bsz = self.config.data.train_batch_size * self.config.actor_rollout_ref.rollout.n
                             if self.config.algorithm.filter_groups.truncate_sample:
+                                print(f"truncate batch to train_bs")
                                 batch = batch[:traj_bsz]
 
                     # balance the number of valid tokens on each dp rank.
