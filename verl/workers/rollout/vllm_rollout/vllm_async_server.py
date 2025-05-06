@@ -169,6 +169,7 @@ class AsyncvLLMServer(AsyncServerBase):
             dtype=config.dtype,
             enforce_eager=config.enforce_eager,
             gpu_memory_utilization=config.gpu_memory_utilization,
+            max_num_seqs=config.max_num_seqs,
             disable_custom_all_reduce=True,
             disable_mm_preprocessor_cache=True,
             skip_tokenizer_init=False,

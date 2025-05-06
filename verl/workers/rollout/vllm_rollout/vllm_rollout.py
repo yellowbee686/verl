@@ -122,6 +122,7 @@ class vLLMRollout(BaseRollout):
             dtype=config.dtype,
             enforce_eager=config.enforce_eager,
             gpu_memory_utilization=config.gpu_memory_utilization,
+            max_num_seqs=config.max_num_seqs,
             skip_tokenizer_init=False,
             max_model_len=max_model_len,
             load_format=config.load_format,
