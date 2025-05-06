@@ -25,7 +25,6 @@ from .dapo_ray_trainer import RayDAPOTrainer
 
 def get_custom_reward_fn(config):
     import importlib.util
-    import os
 
     reward_fn_config = config.get("custom_reward_function") or {}
     file_path = reward_fn_config.get("path")
@@ -58,9 +57,6 @@ def main(config):
 
 
 def run_ppo(config) -> None:
-    # TODO(linjunrong.ocss884): this ENV is left for resolving SGLang conflict with ray devices
-    # isolation, will solve in the future
-    os.environ["ENSURE_CUDA_VISIBLE_DEVICES"] = os.environ.get("CUDA_VISIBLE_DEVICES", "")
     if not ray.is_initialized():
         # this is for local ray cluster
         ray.init(
@@ -95,8 +91,8 @@ class TaskRunner:
         processor = hf_processor(local_path, use_fast=True)  # used for multimodal LLM, could be none
 
         # define worker classes
-        if config.actor_rollout_ref.actor.strategy == "fsdp":
-            assert config.actor_rollout_ref.actor.strategy == config.critic.strategy
+        if config.actor_rollout_ref.actor.strategy in ["fsdp", "fsdp2"]:
+            assert config.actor_rollout_ref.ref.strategy in ["fsdp", "fsdp2"]
             from verl.single_controller.ray import RayWorkerGroup
             from verl.workers.fsdp_workers import ActorRolloutRefWorker, CriticWorker
 
@@ -135,7 +131,7 @@ class TaskRunner:
         # - finally, we combine all the rewards together
         # - The reward type depends on the tag of the data
         if config.reward_model.enable:
-            if config.reward_model.strategy == "fsdp":
+            if config.reward_model.strategy in ["fsdp", "fsdp2"]:
                 from verl.workers.fsdp_workers import RewardModelWorker
             elif config.reward_model.strategy == "megatron":
                 from verl.workers.megatron_workers import RewardModelWorker
