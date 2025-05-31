@@ -38,7 +38,7 @@ permissions:
   contents: read
 
 jobs:
-  e2e_gsm8k_megatron:
+  kernels:
     runs-on: [L20x8]
     timeout-minutes: 40 # Increase this timeout value as needed
     env:
@@ -47,7 +47,7 @@ jobs:
       NO_PROXY: "localhost,127.0.0.1"
       HF_HUB_ENABLE_HF_TRANSFER: 1
     container:
-      image: whatcanyousee/verl:ngc-cu124-vllm0.8.5-sglang0.4.6-mcore0.12.0-te2.3
+      image: whatcanyousee/verl:ngc-cu124-vllm0.8.5-sglang0.4.6.post5-mcore0.12.0-te2.3
       options: --gpus all --shm-size=10g
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -60,3 +60,6 @@ jobs:
       - name: Testing LinearCrossEntropy Correction, Computation Time and Memory Consumption
         run: |
           python3 tests/kernels/test_linear_cross_entropy.py
+      - name: Testing LinearCrossEntropyTP Correction, Computation Time and Memory Consumption
+        run: |
+          LOW_MEMORY=True torchrun --standalone --nnodes=1 --nproc-per-node=8 tests/kernels/test_linear_cross_entropy_tp.py
