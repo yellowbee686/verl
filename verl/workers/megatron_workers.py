@@ -145,13 +145,13 @@ class ActorRolloutRefWorker(MegatronWorker):
         from verl.utils.megatron_utils import get_model, init_megatron_optim_config
         from verl.utils.model import get_generation_config, print_model_size
 
-        self._init_hf_config_and_tf_config(model_path, self.dtype, override_model_config, override_transformer_config)
+        self._init_hf_config_and_tf_config(model_path, self.dtype, override_model_config, override_transformer_config, self.config.model.get("trust_remote_code", False))
         self.generation_config = get_generation_config(self.local_path)
 
         def megatron_actor_model_provider(pre_process, post_process):
             from verl.models.mcore import init_mcore_model
 
-            parallel_model = init_mcore_model(self.tf_config, self.hf_config, pre_process, post_process, share_embeddings_and_output_weights=self.share_embeddings_and_output_weights, value=False, fix_moe_router=override_model_config.get("moe_config", {}).get("fix_moe_router", False))
+            parallel_model = init_mcore_model(self.tf_config, self.hf_config, pre_process, post_process, share_embeddings_and_output_weights=self.share_embeddings_and_output_weights, value=False, freeze_moe_router=override_model_config.get("moe_config", {}).get("freeze_moe_router", False))
             parallel_model.cuda()
             return parallel_model
 
@@ -226,7 +226,7 @@ class ActorRolloutRefWorker(MegatronWorker):
             rollout_device_mesh = init_device_mesh("cuda", mesh_shape=(dp, infer_tp), mesh_dim_names=["dp", "infer_tp"])
             log_gpu_memory_usage("Before building vllm rollout", logger=None)
 
-            local_path = copy_to_local(self.config.model.path)
+            local_path = copy_to_local(self.config.model.path, use_shm=self.config.model.get('use_shm', False))
             if vllm_mode == "customized":
                 rollout = vLLMRollout(
                     actor_module=self.actor_module,
@@ -629,12 +629,12 @@ class CriticWorker(MegatronWorker):
         from verl.utils.megatron_utils import get_model, init_megatron_optim_config
         from verl.utils.model import print_model_size
 
-        self._init_hf_config_and_tf_config(model_path, self.dtype, override_model_config, override_transformer_config)
+        self._init_hf_config_and_tf_config(model_path, self.dtype, override_model_config, override_transformer_config, self.config.model.get("trust_remote_code", False))
 
         def megatron_critic_model_provider(pre_process, post_process):
             from verl.models.mcore import init_mcore_model
 
-            parallel_model = init_mcore_model(self.tf_config, self.hf_config, pre_process, post_process, share_embeddings_and_output_weights=False, value=True, fix_moe_router=override_model_config.get("moe_config", {}).get("fix_moe_router", False))
+            parallel_model = init_mcore_model(self.tf_config, self.hf_config, pre_process, post_process, share_embeddings_and_output_weights=False, value=True, freeze_moe_router=override_model_config.get("moe_config", {}).get("freeze_moe_router", False))
             parallel_model.cuda()
             return parallel_model
 
@@ -825,7 +825,7 @@ class RewardModelWorker(MegatronWorker):
 
         from verl.utils.megatron_utils import get_model
 
-        self._init_hf_config_and_tf_config(model_path, self.dtype, override_model_config, override_transformer_config)
+        self._init_hf_config_and_tf_config(model_path, self.dtype, override_model_config, override_transformer_config, self.config.model.get("trust_remote_code", False))
 
         def megatron_rm_model_provider(pre_process, post_process):
             from verl.models.mcore import init_mcore_model
@@ -877,12 +877,13 @@ class RewardModelWorker(MegatronWorker):
         override_model_config = OmegaConf.to_container(self.config.model.get("override_config", OmegaConf.create()))
         override_transformer_config = OmegaConf.to_container(self.config.megatron.get("override_transformer_config", OmegaConf.create()), resolve=True)
 
-        sft_tokenizer_local_path = copy_to_local(self.config.model.input_tokenizer)
+        use_shm = self.config.model.get('use_shm', False)
+        sft_tokenizer_local_path = copy_to_local(self.config.model.input_tokenizer, use_shm=use_shm)
         sft_tokenizer = hf_tokenizer(sft_tokenizer_local_path)
         rm_tokenizer_path = self.config.model.get("rm_tokenizer", None)
         rm_tokenizer = None
         if rm_tokenizer_path is not None:
-            rm_tokenizer_local_path = copy_to_local(rm_tokenizer_path)
+            rm_tokenizer_local_path = copy_to_local(rm_tokenizer_path, use_shm=use_shm)
             rm_tokenizer = hf_tokenizer(rm_tokenizer_local_path)
 
         self.param_dtype = torch.bfloat16
