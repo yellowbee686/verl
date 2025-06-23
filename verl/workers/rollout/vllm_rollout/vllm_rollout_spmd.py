@@ -156,7 +156,6 @@ class vLLMRollout(BaseRollout):
             gpu_memory_utilization=config.gpu_memory_utilization,
             max_num_seqs=config.max_num_seqs,
             disable_custom_all_reduce=True,
-            disable_mm_preprocessor_cache=True,
             skip_tokenizer_init=False,
             max_model_len=max_model_len,
             load_format=load_format,
