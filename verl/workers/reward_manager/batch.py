@@ -64,6 +64,7 @@ class BatchRewardManager:
             solution_strs=responses_str,
             ground_truths=ground_truths,
             extra_infos=extras,
+            valid_response_lengths=valid_response_lengths,
             **self.reward_kwargs,
         )
 
