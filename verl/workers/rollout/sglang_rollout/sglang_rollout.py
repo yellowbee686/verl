@@ -403,6 +403,12 @@ class SGLangRollout(BaseRollout):
         node_rank = self._tp_rank // tp_size_per_node
         first_rank_in_node = self._tp_rank % tp_size_per_node == 0
 
+        # Support model configuration override for YARN and other extensions
+        json_model_override_args = self.config.get("json_model_override_args", "{}")
+        if isinstance(json_model_override_args, dict):
+            import json
+            json_model_override_args = json.dumps(json_model_override_args)
+
         if first_rank_in_node:
             rank = dist.get_rank()
             os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
@@ -433,6 +439,8 @@ class SGLangRollout(BaseRollout):
                 attention_backend="fa3",
                 # In async mode, we want token in token out.
                 skip_tokenizer_init=self.config.mode == "async",
+                # Support model configuration override (e.g., YARN rope_scaling)
+                json_model_override_args=json_model_override_args,
             )
         else:
             self._engine = None
