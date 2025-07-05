@@ -221,7 +221,7 @@ class AgentLoopWorker:
         agent_names = batch.non_tensor_batch["agent_name"].repeat(n, axis=0)
         raw_prompts = batch.non_tensor_batch["raw_prompt"].repeat(n, axis=0)
         for agent_name, messages in zip(agent_names, raw_prompts):
-            tasks.append(asyncio.create_task(self._run_agent_loop(agent_name, messages.tolist(), sampling_params)))
+            tasks.append(asyncio.create_task(self._run_agent_loop(agent_name, messages if isinstance(messages, list) else messages.tolist(), sampling_params)))
         outputs = await asyncio.gather(*tasks)
 
         output = self._postprocess(outputs)
