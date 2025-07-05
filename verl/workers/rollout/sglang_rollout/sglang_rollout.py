@@ -404,10 +404,8 @@ class SGLangRollout(BaseRollout):
         first_rank_in_node = self._tp_rank % tp_size_per_node == 0
 
         # Support model configuration override for YARN and other extensions
-        json_model_override_args = self.config.get("json_model_override_args", "{}")
-        if isinstance(json_model_override_args, dict):
-            import json
-            json_model_override_args = json.dumps(json_model_override_args)
+        # Read JSON configuration directly from environment variable
+        json_model_override_args = os.getenv("YARN_JSON_CONFIG", "{}")
 
         if first_rank_in_node:
             rank = dist.get_rank()
