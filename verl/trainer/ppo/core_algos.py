@@ -943,7 +943,7 @@ def compute_policy_loss_gspo(
     pg_losses = torch.maximum(pg_losses1, pg_losses2)
 
     # for GSPO, we need to aggregate the loss at the sequence level (seq-mean-token-mean)
-    pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode="seq-mean-token-mean")
+    pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
 
     # For compatibility, return zero for pg_clipfrac_lower (not used in standard GSPO)
     pg_clipfrac = verl_F.masked_mean(torch.gt(pg_losses2, pg_losses1).float(), response_mask)
