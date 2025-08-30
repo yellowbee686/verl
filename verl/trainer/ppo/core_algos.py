@@ -914,6 +914,7 @@ def compute_policy_loss_gspo(
     response_mask: torch.Tensor,
     loss_agg_mode: str = "seq-mean-token-mean",
     config: Optional[DictConfig | ActorConfig] = None,
+    rollout_log_probs=None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Compute the clipped policy objective and related metrics for GSPO.
@@ -931,6 +932,10 @@ def compute_policy_loss_gspo(
             Mask indicating which tokens to include in the loss, shape (batch_size, response_length).
         loss_agg_mode (str, optional):
             Aggregation mode for `agg_loss`. For GSPO, it is recommended to use "seq-mean-token-mean".
+        config: `(verl.trainer.config.ActorConfig)`:
+            config for the actor.
+        rollout_log_probs: `(torch.Tensor)`:
+            log probabilities of actions under the rollout policy, shape (batch_size, response_length).
     """
 
     assert config is not None
@@ -958,6 +963,12 @@ def compute_policy_loss_gspo(
     pg_losses1 = -advantages * seq_importance_ratio
     pg_losses2 = -advantages * torch.clamp(seq_importance_ratio, 1 - clip_ratio_low, 1 + clip_ratio_high)
     pg_losses = torch.maximum(pg_losses1, pg_losses2)
+
+    if config.tis_imp_ratio_cap > 0 and rollout_log_probs is not None:
+        # Apply truncated importance sampling -> https://fengyao.notion.site/off-policy-rl
+        tis_imp_ratio = torch.exp(old_log_prob - rollout_log_probs)
+        tis_imp_ratio = torch.clamp(tis_imp_ratio, max=config.tis_imp_ratio_cap)
+        pg_losses = pg_losses * tis_imp_ratio
 
     # for GSPO, we need to aggregate the loss at the sequence level (seq-mean-token-mean)
     pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
