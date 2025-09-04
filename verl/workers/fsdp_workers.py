@@ -320,7 +320,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         override_config_kwargs.update(override_model_config)
         update_model_config(actor_model_config, override_config_kwargs=override_config_kwargs)
 
-        actor_model_config.dtype = torch.bfloat16
+        actor_model_config.dtype = torch_dtype
         
         if self.rank == 0:
             print(f"torch_dtype: {torch_dtype}, Model config after override: {actor_model_config}")
