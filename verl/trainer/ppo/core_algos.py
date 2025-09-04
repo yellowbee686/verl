@@ -966,10 +966,23 @@ def compute_policy_loss_gspo(
     pg_losses = torch.maximum(pg_losses1, pg_losses2)
 
     if config.tis_imp_ratio_cap > 0 and rollout_log_probs is not None:
-        # Apply truncated importance sampling -> https://fengyao.notion.site/off-policy-rl
-        tis_imp_ratio = torch.exp(old_log_prob - rollout_log_probs)
-        tis_imp_ratio = torch.clamp(tis_imp_ratio, max=config.tis_imp_ratio_cap)
-        pg_losses = pg_losses * tis_imp_ratio
+        # 序列长度
+        seq_lengths = torch.sum(response_mask, dim=-1).clamp(min=1)
+
+        # 序列级 log-权重: old / rollout
+        tis_log_ratio_seq = torch.sum((old_log_prob - rollout_log_probs) * response_mask, dim=-1) / seq_lengths  # shape: [B]
+
+        # 数值稳定：可选在 log 域截断（对应 ratio 上限为 cap）
+        # 也可直接在 ratio 域截断，二者等价
+        tis_ratio_seq = torch.exp(tis_log_ratio_seq)
+        tis_ratio_seq = torch.clamp(tis_ratio_seq, max=config.tis_imp_ratio_cap)
+
+        # 广播到 token 维度；重要：不对该权重求梯度
+        tis_ratio = tis_ratio_seq.detach().unsqueeze(-1)
+
+        # 与 GRPO 一致：在裁剪后乘权，不影响裁剪判定
+        pg_losses = pg_losses * tis_ratio
+
 
     # for GSPO, we need to aggregate the loss at the sequence level (seq-mean-token-mean)
     pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
