@@ -319,8 +319,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         }
         override_config_kwargs.update(override_model_config)
         update_model_config(actor_model_config, override_config_kwargs=override_config_kwargs)
+
+        actor_model_config.dtype = torch.bfloat16
+        
         if self.rank == 0:
-            print(f"Model config after override: {actor_model_config}")
+            print(f"torch_dtype: {torch_dtype}, Model config after override: {actor_model_config}")
 
         # NOTE(fix me): tie_word_embedding causes meta_tensor init to hang
         init_context = get_init_weight_context_manager(
