@@ -319,10 +319,6 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         }
         override_config_kwargs.update(override_model_config)
         update_model_config(actor_model_config, override_config_kwargs=override_config_kwargs)
-
-        # transformers 4.54.1设置为torch_dtype后log actor_model_config会报错, 4.56.0正常
-        actor_model_config.dtype = torch_dtype
-        
         if self.rank == 0:
             print(f"torch_dtype: {torch_dtype}, Model config after override: {actor_model_config}")
 
