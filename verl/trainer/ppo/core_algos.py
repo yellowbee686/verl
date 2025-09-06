@@ -969,8 +969,9 @@ def compute_policy_loss_gspo(
         # 序列级 log-权重: old / rollout
         tis_log_ratio_seq = torch.sum((old_log_prob - rollout_log_probs) * response_mask, dim=-1) / seq_lengths  # shape: [B]
         # 改为log域截断
-        tis_log_ratio_seq = torch.clamp(tis_log_ratio_seq, min=-config.tis_imp_ratio_cap, max=config.tis_imp_ratio_cap)
         tis_ratio_seq = torch.exp(tis_log_ratio_seq)
+        tis_ratio_seq = torch.clamp(tis_ratio_seq, max=config.tis_imp_ratio_cap)
+        # tis_log_ratio_seq = torch.clamp(tis_log_ratio_seq, min=-config.tis_imp_ratio_cap, max=config.tis_imp_ratio_cap)
 
         # 广播到 token 维度；重要：不对该权重求梯度
         tis_ratio = tis_ratio_seq.detach().unsqueeze(-1)
