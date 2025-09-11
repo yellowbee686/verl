@@ -488,7 +488,6 @@ class DataParallelPPOActor(BasePPOActor):
                         #     aux_loss = aux_loss.to(device=policy_loss.device, dtype=policy_loss.dtype)
                         policy_loss = policy_loss + aux_loss * self.config.router_aux_loss_coef
                         micro_batch_metrics["actor/aux_loss"] = aux_loss.detach().item() * loss_scale_factor
-                        micro_batch_metrics["actor/router_aux_loss_coef"] = self.config.router_aux_loss_coef
 
                     if self.config.use_dynamic_bsz:
                         # relative to the dynamic bsz
