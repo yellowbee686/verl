@@ -480,7 +480,7 @@ class DataParallelPPOActor(BasePPOActor):
 
                     # integrate auxiliary MoE load-balancing loss
                     # in model forward without label, aux_loss doesn't multiply router_aux_loss_coef
-                    if aux_loss is not None:
+                    if aux_loss is not None and self.config.router_aux_loss_coef > 0:
                         aux_loss = aux_loss.to(device=policy_loss.device, dtype=policy_loss.dtype)
                         # if not torch.is_tensor(aux_loss):
                         #     aux_loss = torch.as_tensor(aux_loss, device=policy_loss.device, dtype=policy_loss.dtype)

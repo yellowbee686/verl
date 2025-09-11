@@ -89,7 +89,7 @@ kl_loss_coef: 0.001
 kl_loss_type: low_var_kl
 
 # Auxiliary MoE load-balancing loss coefficient
-router_aux_loss_coef: 0.01
+router_aux_loss_coef: 0.0
 
 # Number of PPO epochs per batch
 ppo_epochs: 1
