@@ -89,7 +89,7 @@ class DataParallelPPOActor(BasePPOActor):
 
     def _forward_micro_batch(
         self, micro_batch, temperature, calculate_entropy=False
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor | None, torch.Tensor, torch.Tensor | None]:
         """
         Returns:
             entropy: # (bs, response_len)
@@ -113,6 +113,7 @@ class DataParallelPPOActor(BasePPOActor):
             attention_mask = micro_batch["attention_mask"]
             position_ids = micro_batch["position_ids"]
             entropy = None
+            aux_loss = None
             if position_ids.dim() == 3:  # qwen2vl mrope
                 position_ids = position_ids.transpose(0, 1)  # (bsz, 3, seqlen) -> (3, bsz, seqlen)
 
@@ -182,6 +183,7 @@ class DataParallelPPOActor(BasePPOActor):
                     use_cache=False,
                     **extra_args,
                 )  # prevent model thinks we are generating
+                aux_loss = output.aux_loss
 
                 if self.use_fused_kernels:
                     log_probs = output.log_probs.squeeze(0)  # (total_nnz,)
@@ -260,6 +262,7 @@ class DataParallelPPOActor(BasePPOActor):
                     use_cache=False,
                     **extra_args,
                 )  # prevent model thinks we are generating
+                aux_loss = output.aux_loss
 
                 if self.use_fused_kernels:
                     log_probs = output.log_probs[:, -response_length - 1 : -1]
@@ -277,7 +280,7 @@ class DataParallelPPOActor(BasePPOActor):
                         else:
                             entropy = torch.utils.checkpoint.checkpoint(verl_F.entropy_from_logits, logits)
 
-            return entropy, log_probs
+            return entropy, log_probs, aux_loss
 
     def _optimizer_step(self):
         assert self.config.grad_clip is not None
@@ -340,7 +343,7 @@ class DataParallelPPOActor(BasePPOActor):
             micro_batch = micro_batch.to(get_device_id())
             model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch}
             with torch.no_grad():
-                entropy, log_probs = self._forward_micro_batch(
+                entropy, log_probs, _ = self._forward_micro_batch(
                     model_inputs, temperature=temperature, calculate_entropy=calculate_entropy
                 )
             log_probs_lst.append(log_probs)
@@ -431,7 +434,7 @@ class DataParallelPPOActor(BasePPOActor):
                     calculate_entropy = False
                     if entropy_coeff != 0:
                         calculate_entropy = True
-                    entropy, log_prob = self._forward_micro_batch(
+                    entropy, log_prob, aux_loss = self._forward_micro_batch(
                         model_inputs, temperature=temperature, calculate_entropy=calculate_entropy
                     )
 
@@ -474,6 +477,18 @@ class DataParallelPPOActor(BasePPOActor):
                         policy_loss = policy_loss + kl_loss * self.config.kl_loss_coef
                         micro_batch_metrics["actor/kl_loss"] = kl_loss.detach().item() * loss_scale_factor
                         micro_batch_metrics["actor/kl_coef"] = self.config.kl_loss_coef
+
+                    # integrate auxiliary MoE load-balancing loss
+                    # in model forward without label, aux_loss doesn't multiply router_aux_loss_coef
+                    if aux_loss is not None:
+                        aux_loss = aux_loss.to(device=policy_loss.device, dtype=policy_loss.dtype)
+                        # if not torch.is_tensor(aux_loss):
+                        #     aux_loss = torch.as_tensor(aux_loss, device=policy_loss.device, dtype=policy_loss.dtype)
+                        # else:
+                        #     aux_loss = aux_loss.to(device=policy_loss.device, dtype=policy_loss.dtype)
+                        policy_loss = policy_loss + aux_loss * self.config.router_aux_loss_coef
+                        micro_batch_metrics["actor/aux_loss"] = aux_loss.detach().item() * loss_scale_factor
+                        micro_batch_metrics["actor/router_aux_loss_coef"] = self.config.router_aux_loss_coef
 
                     if self.config.use_dynamic_bsz:
                         # relative to the dynamic bsz

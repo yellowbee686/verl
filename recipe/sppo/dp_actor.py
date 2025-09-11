@@ -131,7 +131,7 @@ class DataParallelSPPOActor(DataParallelPPOActor):
                     calculate_entropy = False
                     if entropy_coeff != 0:
                         calculate_entropy = True
-                    entropy, log_prob = self._forward_micro_batch(
+                    entropy, log_prob, aux_loss = self._forward_micro_batch(
                         micro_batch=data, temperature=temperature, calculate_entropy=calculate_entropy
                     )
 
@@ -165,6 +165,13 @@ class DataParallelSPPOActor(DataParallelPPOActor):
                         policy_loss = policy_loss + kl_loss * self.config.kl_loss_coef
                         metrics["actor/kl_loss"] = kl_loss.detach().item()
                         metrics["actor/kl_coef"] = self.config.kl_loss_coef
+
+                    # integrate auxiliary MoE load-balancing loss after KL
+                    if aux_loss is not None:
+                        if not torch.is_tensor(aux_loss):
+                            aux_loss = torch.as_tensor(aux_loss, device=policy_loss.device, dtype=policy_loss.dtype)
+                        policy_loss = policy_loss + aux_loss
+                        metrics["actor/aux_loss"] = aux_loss.detach().item()
 
                     if self.config.use_dynamic_bsz:
                         # relative to the dynamic bsz
