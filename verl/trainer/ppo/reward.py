@@ -67,7 +67,8 @@ def get_custom_reward_fn(config: DictConfig) -> Optional[RawRewardFn]:
     function_name = reward_fn_config.get("name")
     assert function_name is not None
 
-    module = sys.modules.get("custom_module", None)
+    # module = sys.modules.get("custom_module", None)
+    module = None
     if module is None:
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"Reward function file '{file_path}' not found.")
