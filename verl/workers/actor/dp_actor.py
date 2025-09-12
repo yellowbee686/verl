@@ -183,7 +183,7 @@ class DataParallelPPOActor(BasePPOActor):
                     use_cache=False,
                     **extra_args,
                 )  # prevent model thinks we are generating
-                aux_loss = output.aux_loss
+                aux_loss = getattr(output, "aux_loss", None)
 
                 if self.use_fused_kernels:
                     log_probs = output.log_probs.squeeze(0)  # (total_nnz,)
@@ -262,7 +262,7 @@ class DataParallelPPOActor(BasePPOActor):
                     use_cache=False,
                     **extra_args,
                 )  # prevent model thinks we are generating
-                aux_loss = output.aux_loss
+                aux_loss = getattr(output, "aux_loss", None)
 
                 if self.use_fused_kernels:
                     log_probs = output.log_probs[:, -response_length - 1 : -1]
