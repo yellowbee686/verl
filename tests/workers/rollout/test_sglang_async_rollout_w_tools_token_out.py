@@ -48,6 +48,7 @@ def test_async_sglang_rollout_w_tool():
     max_response_length = 16
     dtype = "bfloat16"
     tensor_parallel_size = 2
+    skip_tokenizer_init = True
     local_model_path = os.path.expanduser("~/models/Qwen/Qwen2.5-0.5B")
 
     tokenizer, actor_model = load_tokenizer_and_model(local_model_path)
@@ -73,7 +74,8 @@ def test_async_sglang_rollout_w_tool():
         max_prompt_length,
         dtype,
         tensor_parallel_size,
-        "./resource/tool_configs/sandbox_fusion_tool_config",
+        tool_config_path="./resource/tool_configs/sandbox_fusion_tool_config",
+        skip_tokenizer_init=skip_tokenizer_init,
     )
     rollout_config: RolloutConfig = omega_conf_to_dataclass(rollout_config, dataclass_type=RolloutConfig)
     model_config = HFModelConfig(path=local_model_path)
