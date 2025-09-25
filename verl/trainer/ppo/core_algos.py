@@ -946,6 +946,82 @@ def compute_policy_loss_vanilla(
     return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower
 
 
+@register_policy_loss("adc")
+def compute_policy_loss_adc(
+    old_log_prob: torch.Tensor,
+    log_prob: torch.Tensor,
+    advantages: torch.Tensor,
+    response_mask: torch.Tensor,
+    loss_agg_mode: str = "token-mean",
+    config: Optional[DictConfig | AlgoConfig] = None,
+    rollout_log_probs: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    ADC policy loss:
+    - When advantages > 0, reverse the sign of negative_approx_kl, which is equivalent to using the reciprocal ratio.
+    - In the case of advantages > 0, also apply dual-clip (no soft-clip here).
+
+    This behavior follows the reference idea and mirrors PPO-style clipping elsewhere in the codebase.
+    """
+
+    assert config is not None
+    assert not isinstance(config, AlgoConfig)
+    clip_ratio = config.clip_ratio
+    clip_ratio_low = config.clip_ratio_low if config.clip_ratio_low is not None else clip_ratio
+    clip_ratio_high = config.clip_ratio_high if config.clip_ratio_high is not None else clip_ratio
+    clip_ratio_c = config.get("clip_ratio_c", 3.0)
+
+    cliprange = clip_ratio
+    cliprange_low = clip_ratio_low
+    cliprange_high = clip_ratio_high
+
+    assert clip_ratio_c > 1.0, (
+        "The lower bound of the clip_ratio_c for dual-clip PPO should be greater than 1.0," + f" but get the value: {clip_ratio_c}."
+    )
+
+    negative_approx_kl = log_prob - old_log_prob
+    # Clamp for stability
+    negative_approx_kl = torch.clamp(negative_approx_kl, min=-20.0, max=20.0)
+
+    # Reverse KL direction when A>0: r -> 1/r (in log-space, negate)
+    reverse_mask = (advantages > 0).float()
+    neg_approx_kl_reversed = negative_approx_kl * (1.0 - reverse_mask) - negative_approx_kl * reverse_mask
+
+    # Compute ratio with potentially reversed KL
+    ratio = torch.exp(neg_approx_kl_reversed)
+    ppo_kl = verl_F.masked_mean(-neg_approx_kl_reversed, response_mask)
+
+    # Standard PPO clipping branches built on the (potentially) reversed ratio
+    pg_losses1 = -advantages * ratio
+    if cliprange_low is None:
+        cliprange_low = cliprange
+    if cliprange_high is None:
+        cliprange_high = cliprange
+    pg_losses2 = -advantages * torch.clamp(ratio, 1 - cliprange_low, 1 + cliprange_high)
+
+    # For A>0 we also apply dual-clip
+    pg_losses3 = -advantages * clip_ratio_c
+
+    # For tokens with A>0: use dual-clip with reversed ratio; A<=0: use standard PPO clip
+    clip_pg_losses_base = torch.maximum(pg_losses1, pg_losses2)
+    clip_pg_losses_dual = torch.min(pg_losses3, clip_pg_losses_base)
+
+    # Select per-token based on A>0
+    pg_losses = torch.where(advantages > 0, clip_pg_losses_dual, clip_pg_losses_base)
+
+    # Metrics: clip fraction at upper band and dual lower band
+    pg_clipfrac = verl_F.masked_mean(torch.gt(pg_losses2, pg_losses1).float(), response_mask)
+    pg_clipfrac_lower = verl_F.masked_mean((advantages > 0).float() * torch.gt(clip_pg_losses_base, pg_losses3).float(), response_mask)
+
+    if config.tis_imp_ratio_cap > 0 and rollout_log_probs is not None:
+        tis_imp_ratio = torch.exp(old_log_prob - rollout_log_probs)
+        tis_imp_ratio = torch.clamp(tis_imp_ratio, max=config.tis_imp_ratio_cap)
+        pg_losses = pg_losses * tis_imp_ratio
+
+    pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+
+    return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower
+
 @register_policy_loss("gspo")
 def compute_policy_loss_gspo(
     old_log_prob: torch.Tensor,
