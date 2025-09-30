@@ -1019,33 +1019,44 @@ def compute_policy_loss_adc(
     # PPO KL should be computed on the original KL (not reversed)
     ppo_kl = verl_F.masked_mean(-negative_approx_kl, response_mask)
 
-    # Standard PPO clipping branches
+    # Standard PPO loss: -A * r
     pg_losses1 = -advantages * ratio
+
     if cliprange_low is None:
         cliprange_low = cliprange
     if cliprange_high is None:
         cliprange_high = cliprange
+
+    # Standard PPO clip
     pg_losses2 = -advantages * torch.clamp(ratio, 1 - cliprange_low, 1 + cliprange_high)
-
-    # Dual-clip guard: adv>0 use max (prevent overly negative loss), adv<0 use min (prevent overly large loss)
-    pg_losses3 = -advantages * clip_ratio_c
-
-    # Base clipped loss (standard PPO clip)
     clip_pg_losses_base = torch.maximum(pg_losses1, pg_losses2)
+
+    # Dual-clip: apply different bounds for positive vs negative advantages
+    # For A>0: we want -A*r, which is negative. Dual-clip prevents r from being too large
+    #          so we set upper bound: r <= clip_ratio_c, i.e., -A*r >= -A*clip_ratio_c
+    #          use max(-A*r, -A*clip_ratio_c) to prevent overly negative loss
+    # For A<0: we want -A*r, which is positive. Dual-clip prevents r from being too small
+    #          so we set lower bound: r >= 1/clip_ratio_c, i.e., -A*r <= -A/clip_ratio_c
+    #          use min(-A*r, -A/clip_ratio_c) to prevent overly positive loss
 
     pos_mask = advantages > 0
     neg_mask = advantages < 0
 
-    # Apply dual-clip asymmetrically
-    pg_losses_pos = torch.maximum(clip_pg_losses_base, pg_losses3)
-    pg_losses_neg = torch.minimum(clip_pg_losses_base, pg_losses3)
-    pg_losses = torch.where(pos_mask, pg_losses_pos, torch.where(neg_mask, pg_losses_neg, clip_pg_losses_base))
+    # For positive advantages: upper bound on ratio
+    pg_losses_dual_pos = torch.maximum(clip_pg_losses_base, -advantages * clip_ratio_c)
 
-    # Metrics: upper clip fraction and dual-clip trigger fraction (both sides)
+    # For negative advantages: lower bound on ratio (1/clip_ratio_c)
+    pg_losses_dual_neg = torch.minimum(clip_pg_losses_base, -advantages / clip_ratio_c)
+
+    pg_losses = torch.where(pos_mask, pg_losses_dual_pos, torch.where(neg_mask, pg_losses_dual_neg, clip_pg_losses_base))
+
+    # Metrics
     pg_clipfrac = verl_F.masked_mean(torch.gt(pg_losses2, pg_losses1).float(), response_mask)
-    lower_clip_pos = pos_mask & (pg_losses3 > clip_pg_losses_base)
-    lower_clip_neg = neg_mask & (clip_pg_losses_base > pg_losses3)
-    pg_clipfrac_lower = verl_F.masked_mean((lower_clip_pos | lower_clip_neg).float(), response_mask)
+
+    # Dual-clip trigger fraction
+    dual_clip_pos = pos_mask & ((-advantages * clip_ratio_c) > clip_pg_losses_base)
+    dual_clip_neg = neg_mask & (clip_pg_losses_base > (-advantages / clip_ratio_c))
+    pg_clipfrac_lower = verl_F.masked_mean((dual_clip_pos | dual_clip_neg).float(), response_mask)
 
     if config.tis_imp_ratio_cap > 0 and rollout_log_probs is not None:
         tis_imp_ratio = torch.exp(old_log_prob - rollout_log_probs)
