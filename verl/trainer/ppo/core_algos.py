@@ -1012,15 +1012,17 @@ def compute_policy_loss_adc(
     # Clamp for stability
     negative_approx_kl = torch.clamp(negative_approx_kl, min=-20.0, max=20.0)
 
-    # For A>0: use reciprocal ratio = exp(-negative_approx_kl) = exp(old_log_prob - log_prob)
-    # For A<=0: use normal ratio = exp(negative_approx_kl)
-    ratio = torch.exp(torch.where(advantages > 0, -negative_approx_kl, negative_approx_kl))
-
-    # PPO KL should be computed on the original KL (not reversed)
+    # Standard ratio
+    ratio = torch.exp(negative_approx_kl)
     ppo_kl = verl_F.masked_mean(-negative_approx_kl, response_mask)
 
-    # Standard PPO loss: -A * r
-    pg_losses1 = -advantages * ratio
+    # For A>0: when current > old (ratio > 1), use old/current to constrain
+    #          when current <= old (ratio <= 1), use standard ratio
+    # For A<=0: always use standard ratio
+    ratio_adc = torch.where(advantages > 0, 1.0 / ratio, ratio)
+
+    # Standard PPO loss (use standard ratio for gradient direction)
+    pg_losses1 = -advantages * ratio_adc
 
     if cliprange_low is None:
         cliprange_low = cliprange
@@ -1031,32 +1033,22 @@ def compute_policy_loss_adc(
     pg_losses2 = -advantages * torch.clamp(ratio, 1 - cliprange_low, 1 + cliprange_high)
     clip_pg_losses_base = torch.maximum(pg_losses1, pg_losses2)
 
-    # Dual-clip: apply different bounds for positive vs negative advantages
-    # For A>0: we want -A*r, which is negative. Dual-clip prevents r from being too large
-    #          so we set upper bound: r <= clip_ratio_c, i.e., -A*r >= -A*clip_ratio_c
-    #          use max(-A*r, -A*clip_ratio_c) to prevent overly negative loss
-    # For A<0: we want -A*r, which is positive. Dual-clip prevents r from being too small
-    #          so we set lower bound: r >= 1/clip_ratio_c, i.e., -A*r <= -A/clip_ratio_c
-    #          use min(-A*r, -A/clip_ratio_c) to prevent overly positive loss
-
+    # Dual-clip for both sides: adv>0 use max; adv<0 use min
+    pg_losses3 = -advantages * clip_ratio_c
     pos_mask = advantages > 0
     neg_mask = advantages < 0
 
-    # For positive advantages: upper bound on ratio
-    pg_losses_dual_pos = torch.maximum(clip_pg_losses_base, -advantages * clip_ratio_c)
-
-    # For negative advantages: lower bound on ratio (1/clip_ratio_c)
-    pg_losses_dual_neg = torch.minimum(clip_pg_losses_base, -advantages / clip_ratio_c)
-
-    pg_losses = torch.where(pos_mask, pg_losses_dual_pos, torch.where(neg_mask, pg_losses_dual_neg, clip_pg_losses_base))
+    pg_losses_pos = torch.maximum(clip_pg_losses_base, pg_losses3)
+    pg_losses_neg = torch.minimum(clip_pg_losses_base, pg_losses3)
+    pg_losses = torch.where(pos_mask, pg_losses_pos, torch.where(neg_mask, pg_losses_neg, clip_pg_losses_base))
 
     # Metrics
     pg_clipfrac = verl_F.masked_mean(torch.gt(pg_losses2, pg_losses1).float(), response_mask)
 
-    # Dual-clip trigger fraction
-    dual_clip_pos = pos_mask & ((-advantages * clip_ratio_c) > clip_pg_losses_base)
-    dual_clip_neg = neg_mask & (clip_pg_losses_base > (-advantages / clip_ratio_c))
-    pg_clipfrac_lower = verl_F.masked_mean((dual_clip_pos | dual_clip_neg).float(), response_mask)
+    # Dual-clip trigger fraction (both sides)
+    lower_clip_pos = pos_mask & (pg_losses3 > clip_pg_losses_base)
+    lower_clip_neg = neg_mask & (clip_pg_losses_base > pg_losses3)
+    pg_clipfrac_lower = verl_F.masked_mean((lower_clip_pos | lower_clip_neg).float(), response_mask)
 
     if config.tis_imp_ratio_cap > 0 and rollout_log_probs is not None:
         tis_imp_ratio = torch.exp(old_log_prob - rollout_log_probs)
