@@ -986,11 +986,11 @@ def compute_policy_loss_adc(
     rollout_log_probs: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
-    ADC policy loss:
-    - When advantages > 0, use reciprocal ratio (equivalent to reversing KL sign).
-    - In the case of advantages > 0, also apply dual-clip (no soft-clip here).
-
-    This behavior follows the reference idea and mirrors PPO-style clipping elsewhere in the codebase.
+    ADC policy loss (Asymmetric Dual-Clipping):
+    - For advantages > 0: invert importance ratio (use 1/ratio).
+    - Extend dual-clip to advantages > 0 as well.
+    - Use Soft Clip in dual-clip region to limit weight while preserving gradients.
+      Keep original PPO clip as Hard Clip (fully masks updates outside range via clamp + max rule).
     """
 
     assert config is not None
@@ -1016,12 +1016,10 @@ def compute_policy_loss_adc(
     ratio = torch.exp(negative_approx_kl)
     ppo_kl = verl_F.masked_mean(-negative_approx_kl, response_mask)
 
-    # For A>0: when current > old (ratio > 1), use old/current to constrain
-    #          when current <= old (ratio <= 1), use standard ratio
-    # For A<=0: always use standard ratio
+    # For A>0: invert IS (use 1 / ratio). For A<=0: use standard ratio.
     ratio_adc = torch.where(advantages > 0, 1.0 / ratio, ratio)
 
-    # Standard PPO loss (use standard ratio for gradient direction)
+    # Standard PPO loss (base branch for gradient direction)
     pg_losses1 = -advantages * ratio_adc
 
     if cliprange_low is None:
@@ -1029,25 +1027,35 @@ def compute_policy_loss_adc(
     if cliprange_high is None:
         cliprange_high = cliprange
 
-    # Standard PPO clip
+    # Standard PPO clip (Hard Clip): clamp by ratio (not inverted) for origin masking region
     pg_losses2 = -advantages * torch.clamp(ratio, 1 - cliprange_low, 1 + cliprange_high)
     clip_pg_losses_base = torch.maximum(pg_losses1, pg_losses2)
 
-    # Dual-clip for both sides: adv>0 use max; adv<0 use min
-    pg_losses3 = -advantages * clip_ratio_c
+    # Soft Clip for dual-clip region: limit weights but preserve gradients via STE clamp
+    def _soft_clamp(x: torch.Tensor, min_val: float | None = None, max_val: float | None = None) -> torch.Tensor:
+        x_clamped = torch.clamp(x, min=min_val, max=max_val)
+        return x + (x_clamped - x).detach()
+
+    # Build dual-clip soft target on the IS used for gradient direction
+    ratio_dual_soft = _soft_clamp(ratio_adc, max_val=clip_ratio_c)
+    pg_losses3_soft = -advantages * ratio_dual_soft
+
+    # Apply asymmetric selection:
+    # - adv > 0: use max(base, soft-dual)
+    # - adv < 0: use min(base, soft-dual)
     pos_mask = advantages > 0
     neg_mask = advantages < 0
-
-    pg_losses_pos = torch.maximum(clip_pg_losses_base, pg_losses3)
-    pg_losses_neg = torch.minimum(clip_pg_losses_base, pg_losses3)
+    pg_losses_pos = torch.maximum(clip_pg_losses_base, pg_losses3_soft)
+    pg_losses_neg = torch.minimum(clip_pg_losses_base, pg_losses3_soft)
     pg_losses = torch.where(pos_mask, pg_losses_pos, torch.where(neg_mask, pg_losses_neg, clip_pg_losses_base))
 
     # Metrics
     pg_clipfrac = verl_F.masked_mean(torch.gt(pg_losses2, pg_losses1).float(), response_mask)
 
-    # Dual-clip trigger fraction (both sides)
-    lower_clip_pos = pos_mask & (pg_losses3 > clip_pg_losses_base)
-    lower_clip_neg = neg_mask & (clip_pg_losses_base > pg_losses3)
+    # Dual-clip trigger fraction (both sides), measured by ratio exceeding clip_ratio_c
+    # For adv>0 we monitor the inverted ratio (ratio_adc); for adv<0 we monitor the standard ratio.
+    lower_clip_pos = pos_mask & (ratio_adc > clip_ratio_c)
+    lower_clip_neg = neg_mask & (ratio > clip_ratio_c)
     pg_clipfrac_lower = verl_F.masked_mean((lower_clip_pos | lower_clip_neg).float(), response_mask)
 
     if config.tis_imp_ratio_cap > 0 and rollout_log_probs is not None:
