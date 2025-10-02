@@ -1031,10 +1031,9 @@ def compute_policy_loss_adc(
     pg_losses2 = -advantages * torch.clamp(ratio, 1 - cliprange_low, 1 + cliprange_high)
     clip_pg_losses_base = torch.maximum(pg_losses1, pg_losses2)
 
-    # Soft Clip for dual-clip region: limit weights but preserve gradients via STE clamp
+    # Dual-clip region clamp: limit weights using true clamp to prevent gradient spikes
     def _soft_clamp(x: torch.Tensor, min_val: float | None = None, max_val: float | None = None) -> torch.Tensor:
-        x_clamped = torch.clamp(x, min=min_val, max=max_val)
-        return x + (x_clamped - x).detach()
+        return torch.clamp(x, min=min_val, max=max_val)
 
     # Build dual-clip soft target on the IS used for gradient direction
     ratio_dual_soft = _soft_clamp(ratio_adc, max_val=clip_ratio_c)
