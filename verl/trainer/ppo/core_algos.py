@@ -1031,7 +1031,7 @@ def compute_policy_loss_adc(
     neg_mask = advantages < 0
 
     # Standard PPO clip (Hard Clip) on the ratio driving gradients
-    pg_losses2 = -advantages * torch.clamp(ratio, 1 - cliprange_low, 1 + cliprange_high)
+    pg_losses2 = -advantages * torch.clamp(ratio_adc, 1 - cliprange_low, 1 + cliprange_high)
     clip_pg_losses_base = torch.maximum(pg_losses1, pg_losses2)
 
     pg_losses_dual = -advantages * clip_ratio_c
