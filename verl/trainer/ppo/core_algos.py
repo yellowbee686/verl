@@ -975,8 +975,8 @@ def compute_policy_loss_vanilla(
     return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower
 
 
-@register_policy_loss("adc")
-def compute_policy_loss_adc(
+@register_policy_loss("archer")
+def compute_policy_loss_archer(
     old_log_prob: torch.Tensor,
     log_prob: torch.Tensor,
     advantages: torch.Tensor,
@@ -984,9 +984,10 @@ def compute_policy_loss_adc(
     loss_agg_mode: str = "token-mean",
     config: Optional[DictConfig | AlgoConfig] = None,
     rollout_log_probs: torch.Tensor | None = None,
+    entropy: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
-    ADC policy loss (Asymmetric Dual-Clipping):
+    ancher policy loss (Asymmetric Dual-Clipping):
     - For advantages > 0: invert importance ratio (use 1/ratio).
     - Extend dual-clip to advantages > 0 as well.
     - Use Soft Clip in dual-clip region to limit weight while preserving gradients.
@@ -995,71 +996,43 @@ def compute_policy_loss_adc(
 
     assert config is not None
     assert not isinstance(config, AlgoConfig)
-    clip_ratio = config.clip_ratio
-    clip_ratio_low = config.clip_ratio_low if config.clip_ratio_low is not None else clip_ratio
-    clip_ratio_high = config.clip_ratio_high if config.clip_ratio_high is not None else clip_ratio
+    clip_ratio_low = config.clip_ratio_low
+    clip_ratio_high = config.clip_ratio_hig
     clip_ratio_c = config.get("clip_ratio_c", 3.0)
+    token_entropy_quantile = config.get("token_entropy_quantile", 0.8)
+    masked_entropy = torch.where(response_mask.bool(), entropy.detach(), torch.nan)  # (bsz, response_length)
+    q80 = torch.nanquantile(masked_entropy, q=token_entropy_quantile, dim=-1, keepdim=True)  # (bsz, 1)
+    high_entropy_mask = (masked_entropy <= q80) & response_mask # only low entropy token is True
 
-    cliprange = clip_ratio
-    cliprange_low = clip_ratio_low
-    cliprange_high = clip_ratio_high
+    ratio = torch.exp(torch.clamp(log_prob - old_log_prob, min=-20.0, max=20.0))
 
-    assert clip_ratio_c > 1.0, (
-        "The lower bound of the clip_ratio_c for dual-clip PPO should be greater than 1.0," + f" but get the value: {clip_ratio_c}."
-    )
+    negative_clip_ratio = torch.where(high_entropy_mask, torch.clamp(ratio, min=1-clip_ratio_low, max=None), torch.clamp(ratio, min=1-clip_ratio_high, max=None))
+    positive_clip_ratio = torch.where(high_entropy_mask, torch.clamp(ratio, min=None, max=1+clip_ratio_low), torch.clamp(ratio, min=None, max=1+clip_ratio_high))
 
-    negative_approx_kl = log_prob - old_log_prob
-    # Clamp for stability
-    negative_approx_kl = torch.clamp(negative_approx_kl, min=-20.0, max=20.0)
+    clip_ratio = torch.where(advantages < 0, negative_clip_ratio, positive_clip_ratio)
 
-    # Standard ratio
-    ratio = torch.exp(negative_approx_kl)
-    ppo_kl = verl_F.masked_mean(-negative_approx_kl, response_mask)
+    pg_clipfrac_upper = verl_F.masked_mean(torch.gt(ratio, clip_ratio).float(), response_mask)
+    pg_clipfrac_lower = verl_F.masked_mean(torch.lt(ratio, clip_ratio).float(), response_mask)
 
-    # For A>0: invert IS (use 1 / ratio). For A<=0: use standard ratio.
-    ratio_adc = torch.where(advantages > 0, 1.0 / ratio, ratio)
+    negative_pg_losses_clip = -advantages * negative_clip_ratio
+    positive_pg_losses_clip = -advantages * (positive_clip_ratio / positive_clip_ratio.detach()) / positive_clip_ratio.detach()
 
-    # Standard PPO loss (base branch for gradient direction)
-    pg_losses1 = -advantages * ratio_adc
+    negative_dual_clip_ratio = torch.clamp(negative_clip_ratio, min=None, max=clip_ratio_c)
+    negative_clipped_mask = torch.gt(negative_clip_ratio, negative_dual_clip_ratio)
+    negative_pg_clipfrac_dual = verl_F.masked_mean(negative_clipped_mask.float(), response_mask & (advantages < 0))
+    negative_pg_losses_dual = -advantages * negative_dual_clip_ratio.detach() * log_prob
+    negative_pg_losses = torch.where(negative_clipped_mask, negative_pg_losses_dual, negative_pg_losses_clip)
 
-    if cliprange_low is None:
-        cliprange_low = cliprange
-    if cliprange_high is None:
-        cliprange_high = cliprange
+    positive_dual_clip_ratio = torch.clamp(1/positive_clip_ratio, min=None, max=clip_ratio_c)
+    positive_clipped_mask = torch.gt(1/positive_clip_ratio, positive_dual_clip_ratio)
+    positive_pg_clipfrac_dual = verl_F.masked_mean(positive_clipped_mask.float(), response_mask & (advantages > 0))
+    positive_pg_losses_dual = -advantages * positive_dual_clip_ratio.detach() * log_prob
+    positive_pg_losses = torch.where(positive_clipped_mask, positive_pg_losses_dual, positive_pg_losses_clip)
 
-    pos_mask = advantages > 0
-    neg_mask = advantages < 0
-
-    # Standard PPO clip (Hard Clip) on the ratio driving gradients
-    pg_losses2 = -advantages * torch.clamp(ratio_adc, 1 - cliprange_low, 1 + cliprange_high)
-    clip_pg_losses_base = torch.maximum(pg_losses1, pg_losses2)
-
-    pg_losses_dual = -advantages * clip_ratio_c
-
-    # Apply asymmetric dual-clip selection:
-    # - adv > 0: cap magnitude from below via min(base, -A * clip_ratio_c)
-    # - adv < 0: cap magnitude from above via max(base, -A * clip_ratio_c)
-    pg_losses_pos = torch.maximum(clip_pg_losses_base, pg_losses_dual)
-    pg_losses_neg = torch.minimum(clip_pg_losses_base, pg_losses_dual)
-    pg_losses = torch.where(pos_mask, pg_losses_pos, torch.where(neg_mask, pg_losses_neg, clip_pg_losses_base))
-
-    # Metrics
-    pg_clipfrac = verl_F.masked_mean(torch.gt(pg_losses2, pg_losses1).float(), response_mask)
-
-    # Dual-clip trigger fraction (both sides), measured by ratio exceeding clip_ratio_c
-    # For adv>0 we monitor the inverted ratio (ratio_adc); for adv<0 we monitor the standard ratio.
-    lower_clip_pos = pos_mask & (ratio_adc > clip_ratio_c)
-    lower_clip_neg = neg_mask & (ratio > clip_ratio_c)
-    pg_clipfrac_lower = verl_F.masked_mean((lower_clip_pos | lower_clip_neg).float(), response_mask)
-
-    if config.tis_imp_ratio_cap > 0 and rollout_log_probs is not None:
-        tis_imp_ratio = torch.exp(old_log_prob - rollout_log_probs)
-        tis_imp_ratio = torch.clamp(tis_imp_ratio, max=config.tis_imp_ratio_cap)
-        pg_losses = pg_losses * tis_imp_ratio
-
+    pg_losses = torch.where(advantages < 0, negative_pg_losses, positive_pg_losses)
     pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
 
-    return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower
+    return pg_loss, pg_clipfrac_upper, pg_clipfrac_lower, negative_pg_clipfrac_dual, positive_pg_clipfrac_dual
 
 @register_policy_loss("gspo")
 def compute_policy_loss_gspo(
