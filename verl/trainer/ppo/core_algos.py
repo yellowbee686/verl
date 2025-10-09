@@ -1000,9 +1000,10 @@ def compute_policy_loss_archer(
     clip_ratio_high = config.clip_ratio_high
     clip_ratio_c = config.get("clip_ratio_c", 3.0)
     token_entropy_quantile = config.get("token_entropy_quantile", 0.8)
-    masked_entropy = torch.where(response_mask.bool(), entropy.detach(), torch.nan)  # (bsz, response_length)
+    response_mask_bool = response_mask.bool()
+    masked_entropy = torch.where(response_mask_bool, entropy.detach(), torch.nan)  # (bsz, response_length)
     q80 = torch.nanquantile(masked_entropy, q=token_entropy_quantile, dim=-1, keepdim=True)  # (bsz, 1)
-    high_entropy_mask = (masked_entropy <= q80) & response_mask # only low entropy token is True
+    high_entropy_mask = (masked_entropy <= q80) & response_mask_bool  # only low entropy token is True
 
     ratio = torch.exp(torch.clamp(log_prob - old_log_prob, min=-20.0, max=20.0))
 
