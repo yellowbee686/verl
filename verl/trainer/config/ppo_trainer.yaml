@@ -77,6 +77,14 @@ algorithm:
   # Whether to normalize advantages by std (specific to GRPO)
   norm_adv_by_std_in_grpo: True
 
+  # Reinforce_Ada specific
+  multiround_adaptive_downsampling: False
+  reinforce_ada_choice: "balanced"
+  positive_threshold: 0.7
+  max_rounds: 4
+  round_repeat: 8
+  global_stat_est: False
+
   # Whether to enable in-reward KL penalty
   use_kl_in_reward: False
 

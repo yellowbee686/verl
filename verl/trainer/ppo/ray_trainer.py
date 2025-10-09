@@ -60,6 +60,19 @@ from verl.utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seql
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
 
+# Utility functions for Reinforce-Ada
+import time
+import math
+from verl.trainer.ppo.reinforce_ada_utils import (
+    get_first_dim_size,
+    concat_dataproto_fragments,
+    build_uid_to_fields_mapping,
+    ensure_uid_in_batch,
+    align_context_to_selected,
+    merge_context_fields_into_batch,
+    validate_tensordict_performance,
+    compute_seq_rewards_for_round,
+)
 
 @dataclass
 class ResourcePoolManager:
@@ -918,6 +931,300 @@ class RayPPOTrainer:
         )
         metrics.update(global_balance_stats)
 
+    def _generate_multi_round_adaptive_downsampling(
+        self,
+        orig_prompt_batch: DataProto,
+        positive_threshold: float = 0.7,
+        max_rounds: int = 4,
+        round_repeat: int = 8,
+        final_keep_per_prompt: int = 4,
+        timing_raw: dict | None = None,
+        context_batch: DataProto | None = None,
+    ):
+        """
+        Iterative multi-round generation with early stopping downsampling.
+
+        Args:
+            orig_prompt_batch: Original prompt batch to generate from
+            positive_threshold: Threshold for classifying samples as positive (reward > threshold)
+            max_rounds: Maximum number of rounds to perform
+            round_repeat: Number of samples to generate per active prompt in each round
+            final_keep_per_prompt: Final number of samples to keep per prompt (target: half positive, half negative)
+            timing_raw: Optional dict to record timing information
+            context_batch: Optional context batch for field alignment via uid
+
+        Returns:
+            Tuple of (final_batch, rounds_info) where:
+                - final_batch: DataProto with selected samples and aligned context fields
+                - rounds_info: Dict with per-round statistics
+        """
+        # Build uid -> fields mapping from context
+        ctx_uid_to_fields = {}
+        if context_batch is not None:
+            ctx_uid_to_fields = build_uid_to_fields_mapping(context_batch)
+
+        # Ensure orig_prompt_batch has uid
+        ensure_uid_in_batch(orig_prompt_batch, context_batch)
+        uid_arr = list(orig_prompt_batch.non_tensor_batch["uid"])
+
+        # Initialize state tracking for each uid
+        state = {uid: {"finished": False, "seen": 0, "pos": 0, "neg": 0} for uid in uid_arr}
+
+        # Caches for positive and negative samples per uid
+        pos_cache = defaultdict(list)
+        neg_cache = defaultdict(list)
+        selected_pool_batches: list[DataProto] = []
+        selected_count_by_uid = defaultdict(int)
+        # For GRPO with global statistics estimation
+        uid_full_stats = {uid: {"total_pos": 0, "total_neg": 0} for uid in uid_arr}
+        rounds_info = {"per_round": []}
+
+        # Main generation loop
+        active_uids = set(uid_arr)
+        for r in range(max_rounds):
+            t0 = time.time()
+            if not active_uids:
+                rounds_info["per_round"].append(
+                    {
+                        "round": r,
+                        "active_prompts": 0,
+                        "completed": 0,
+                        "finished_prompts": sum(1 for s in state.values() if s["finished"]),
+                        "sec": 0.0,
+                    }
+                )
+                break
+
+            # Create mini-batch for active prompts only
+            uid_to_idx = {uid: i for i, uid in enumerate(uid_arr)}
+            active_indices = [uid_to_idx[uid] for uid in uid_arr if uid in active_uids]
+            mini_prompt_batch = orig_prompt_batch[active_indices]
+            round_inp = mini_prompt_batch.repeat(repeat_times=round_repeat, interleave=True)
+
+            # Pad to be divisible by dp_size
+            dp_size = self.actor_rollout_wg.dp_size if hasattr(self.actor_rollout_wg, "dp_size") else 8
+            batch_size = len(round_inp)
+            padding_applied = False
+            if batch_size % dp_size != 0:
+                padding_needed = dp_size - (batch_size % dp_size)
+                print(
+                    f"Padding batch from {batch_size} to {batch_size + padding_needed} "
+                    f"to make it divisible by {dp_size}"
+                )
+                indices_to_repeat = list(range(batch_size - padding_needed, batch_size))
+                if len(indices_to_repeat) == 0:
+                    indices_to_repeat = [batch_size - 1] * padding_needed
+                padding_batch = round_inp[indices_to_repeat]
+                round_inp = DataProto.concat([round_inp, padding_batch])
+                padding_applied = True
+
+            # Generate sequences
+            gen_out = (
+                self.actor_rollout_wg.generate_sequences(round_inp)
+                if not self.async_rollout_mode
+                else self.async_rollout_manager.generate_sequences(round_inp)
+            )
+
+            # Remove padding if applied
+            if padding_applied:
+                gen_out = gen_out[:batch_size]
+                round_inp = round_inp[:batch_size]
+
+            # Compute rewards for this round
+            mini_with_out, seq_reward, uids_round = compute_seq_rewards_for_round(
+                mini_prompt_batch=mini_prompt_batch,
+                gen_out=gen_out,
+                ctx_uid_to_fields=ctx_uid_to_fields,
+                reward_fn=self.reward_fn,
+                use_rm=self.use_rm,
+                rm_wg=self.rm_wg,
+                config=self.config,
+                kl_ctrl_in_reward=self.kl_ctrl_in_reward if self.config.algorithm.use_kl_in_reward else None,
+            )
+            seq_reward_np = seq_reward.detach().cpu().numpy().tolist()
+
+            # Group by uid
+            per_uid_local_idx = defaultdict(list)
+            for j, uid in enumerate(uids_round):
+                per_uid_local_idx[uid].append(j)
+
+            # Update state and cache samples
+            completed_this_round = 0
+            for uid in list(active_uids):
+                locs = per_uid_local_idx.get(uid, [])
+                if not locs:
+                    continue
+                st = state[uid]
+
+                # Cache positive and negative samples
+                for j in locs:
+                    if st["finished"]:
+                        break
+                    st["seen"] += 1
+                    is_positive = seq_reward_np[j] > positive_threshold
+                    if is_positive:
+                        st["pos"] += 1
+                        pos_cache[uid].append(mini_with_out[[j]])
+                        uid_full_stats[uid]["total_pos"] += 1
+                    else:
+                        st["neg"] += 1
+                        neg_cache[uid].append(mini_with_out[[j]])
+                        uid_full_stats[uid]["total_neg"] += 1
+
+                def downsample_cache(pos_cache, neg_cache, uid, target_total):
+                    target_pos = min(target_total // 2, len(pos_cache[uid]))
+                    target_neg = min(target_total - target_pos, len(neg_cache[uid]))
+                    if target_pos + target_neg < target_total:
+                        # Not enough total samples, adjust targets
+                        if len(pos_cache[uid]) > target_pos:
+                            additional_pos = min(len(pos_cache[uid]) - target_pos, target_total - (target_pos + target_neg))
+                            target_pos += additional_pos
+                        elif len(neg_cache[uid]) > target_neg:
+                            additional_neg = min(len(neg_cache[uid]) - target_neg, target_total - (target_pos + target_neg))
+                            target_neg += additional_neg
+                    pos_frags = pos_cache[uid][:target_pos]
+                    neg_frags = neg_cache[uid][:target_neg]
+                    merged = concat_dataproto_fragments(pos_frags + neg_frags)
+                    return merged
+
+                # Check if we have enough samples to finish this uid
+                if not st["finished"]:
+                    if self.config.algorithm.reinforce_ada_choice == "balanced":
+                        target_pos = final_keep_per_prompt // 2
+                        target_neg = final_keep_per_prompt - target_pos
+
+                        if len(pos_cache[uid]) >= target_pos and len(neg_cache[uid]) >= target_neg:
+                            merged = downsample_cache(pos_cache, neg_cache, uid, final_keep_per_prompt)
+                            selected_pool_batches.append(merged)
+                            selected_count_by_uid[uid] = get_first_dim_size(merged)
+                            st["finished"] = True
+                            completed_this_round += 1
+
+                    else:  # positive_focused
+                        assert self.config.algorithm.reinforce_ada_choice == "positive_focused", (
+                            "reinforce_ada_choice has to be one of {'balanced', 'positive_focused'}"
+                        )
+                        target_pos = 1
+                        if len(pos_cache[uid]) >= target_pos:
+                            merged = downsample_cache(pos_cache, neg_cache, uid, final_keep_per_prompt)
+                            selected_pool_batches.append(merged)
+                            selected_count_by_uid[uid] = get_first_dim_size(merged)
+                            st["finished"] = True
+                            completed_this_round += 1
+
+            # Update active set
+            active_uids = {u for u in active_uids if not state[u]["finished"]}
+
+            # Record timing and stats
+            sec = time.time() - t0
+            if timing_raw is not None:
+                timing_raw[f"gen_round_{r}_sec"] = sec
+
+            rounds_info["per_round"].append(
+                {
+                    "round": r,
+                    "active_prompts": len(per_uid_local_idx),
+                    "completed": completed_this_round,
+                    "finished_prompts": sum(1 for s in state.values() if s["finished"]),
+                    "reward_mean": float(np.mean(seq_reward_np)) if seq_reward_np else 0.0,
+                    "sec": round(sec, 3),
+                }
+            )
+            print(
+                f"[Gen-Round {r}] active_prompts={len(per_uid_local_idx)} "
+                f"completed={completed_this_round} "
+                f"finished={rounds_info['per_round'][-1]['finished_prompts']} "
+                f"time={sec:.3f}s "
+                f"reward_mean={rounds_info['per_round'][-1]['reward_mean']:.4f}"
+            )
+
+            if not active_uids:
+                break
+
+        # Handle fallback for uids that didn't reach target
+        uids_that_need_fallback = {uid for uid in uid_arr if not state[uid]["finished"]}
+
+        for uid in uids_that_need_fallback:
+            if uid in pos_cache or uid in neg_cache:
+                pos_num = len(pos_cache[uid])
+                neg_num = len(neg_cache[uid])
+                n_rows = pos_num + neg_num
+                take = min(final_keep_per_prompt, n_rows)
+
+                if n_rows < final_keep_per_prompt:
+                    print(
+                        f"[WARN] uid={uid} has {n_rows} samples, less than target "
+                        f"{final_keep_per_prompt}, but continuing"
+                    )
+
+                if self.config.algorithm.reinforce_ada_choice == "positive_focused":
+                    ratio = (pos_num / n_rows) if n_rows > 0 else 0.0
+                    target_pos = math.ceil(ratio * final_keep_per_prompt)
+                    target_pos = max(min(target_pos, take - 1), 1)
+                    target_neg = take - target_pos
+
+                actual_pos = min(pos_num, target_pos)
+                actual_neg = min(neg_num, target_neg)
+
+                # If one type is insufficient, fill with the other
+                if actual_pos + actual_neg < take:
+                    if pos_num > actual_pos:
+                        additional_pos = min(pos_num - actual_pos, take - actual_pos - actual_neg)
+                        actual_pos += additional_pos
+                    elif neg_num > actual_neg:
+                        additional_neg = min(neg_num - actual_neg, take - actual_pos - actual_neg)
+                        actual_neg += additional_neg
+
+                keep_pos = actual_pos
+                keep_neg = actual_neg
+                pos_frags = pos_cache[uid][:keep_pos] if keep_pos > 0 else []
+                neg_frags = neg_cache[uid][:keep_neg] if keep_neg > 0 else []
+                frags_to_merge = pos_frags + neg_frags
+
+                if frags_to_merge:
+                    merged = concat_dataproto_fragments(frags_to_merge)
+                    selected_pool_batches.append(merged)
+                    selected_count_by_uid[uid] = get_first_dim_size(merged)
+                else:
+                    print(f"[WARN] uid={uid} frags_to_merge is empty, cannot fallback")
+            else:
+                print(f"[WARN] uid={uid} not in pos_cache or neg_cache, cannot fallback")
+
+        if not selected_pool_batches:
+            raise RuntimeError(
+                "No samples selected after early stopping. Check if threshold/rules are too strict or data is abnormal"
+            )
+
+        # Concatenate all selected samples
+        selected_batch = concat_dataproto_fragments(selected_pool_batches)
+
+        # Align context fields to selected batch
+        _context_src = context_batch if context_batch is not None else orig_prompt_batch
+        ctx_rows = align_context_to_selected(selected_batch, _context_src)
+
+        # Merge missing fields from context into selected batch
+        merge_context_fields_into_batch(selected_batch, ctx_rows)
+
+        final_batch = selected_batch
+
+        # Ensure token_level_scores exists (fallback to token_level_rewards)
+        if "token_level_scores" not in final_batch.batch and "token_level_rewards" in final_batch.batch:
+            final_batch.batch["token_level_scores"] = final_batch.batch["token_level_rewards"]
+
+        # For GRPO with global stats, log pos/neg counts
+        uid_to_pos_count = {uid: stats["total_pos"] for uid, stats in uid_full_stats.items()}
+        uid_to_neg_count = {uid: stats["total_neg"] for uid, stats in uid_full_stats.items()}
+
+        if not hasattr(final_batch, "meta_info") or final_batch.meta_info is None:
+            final_batch.meta_info = {}
+        final_batch.meta_info["grpo_uid_to_pos_count"] = uid_to_pos_count
+        final_batch.meta_info["grpo_uid_to_neg_count"] = uid_to_neg_count
+
+        # Validate that we maintained efficient TensorDict structure
+        validate_tensordict_performance(final_batch, context="final_batch")
+
+        return final_batch, rounds_info
+
     def fit(self):
         """
         The training loop of PPO.
@@ -998,35 +1305,93 @@ class RayPPOTrainer:
                 is_last_step = self.global_steps >= self.total_training_steps
                 with marked_timer("step", timing_raw):
                     # generate a batch
-                    with marked_timer("gen", timing_raw, color="red"):
-                        if not self.async_rollout_mode:
-                            gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
+                    if self.config.algorithm.multiround_adaptive_downsampling:
+                        with marked_timer("gen_multi_round", timing_raw, color="red"):
+                            final_batch, rounds_info = self._generate_multi_round_adaptive_downsampling(
+                                orig_prompt_batch=gen_batch,
+                                positive_threshold=self.config.algorithm.positive_threshold,
+                                max_rounds=self.config.algorithm.max_rounds,
+                                round_repeat=self.config.algorithm.round_repeat,
+                                final_keep_per_prompt=self.config.actor_rollout_ref.rollout.n,
+                                timing_raw=timing_raw,
+                                context_batch=batch,
+                            )
+
+                        total_prompts = len(set(gen_batch.non_tensor_batch["uid"]))
+                        print(
+                            f"[Summary] prompts={total_prompts}, selected_rows={len(final_batch)}, "
+                            f"max_rounds={self.config.algorithm.max_rounds}"
+                        )
+                        if rounds_info.get("per_round"):
+                            for info in rounds_info["per_round"]:
+                                print(
+                                    f"  - round {info['round']}: active={info['active_prompts']}, "
+                                    f"completed={info['completed']}, finished={info['finished_prompts']}, "
+                                    f"time={info['sec']}s"
+                                )
+
+                        metrics["sampling/total_samples"] = np.sum(
+                            [
+                                (info["active_prompts"] * self.config.algorithm.round_repeat)
+                                for info in rounds_info["per_round"]
+                            ]
+                        )
+                        metrics["sampling/prompts_active_only_1st_round"] = rounds_info["per_round"][0][
+                            "finished_prompts"
+                        ]
+
+                        if len(rounds_info["per_round"]) > 1:
+                            metrics["sampling/prompts_active_after_1st_round"] = rounds_info["per_round"][1][
+                                "active_prompts"
+                            ] - (
+                                rounds_info["per_round"][0]["active_prompts"]
+                                - rounds_info["per_round"][-1]["finished_prompts"]
+                            )
                         else:
-                            gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch)
+                            metrics["sampling/prompts_active_after_1st_round"] = 0
 
-                        timing_raw.update(gen_batch_output.meta_info["timing"])
-                        gen_batch_output.meta_info.pop("timing", None)
+                        metrics["sampling/prompts_no_positive_anywhere"] = (
+                            rounds_info["per_round"][0]["active_prompts"]
+                            - rounds_info["per_round"][-1]["finished_prompts"]
+                        )
+                        metrics["sampling/kept_samples"] = len(final_batch)
+                        metrics["critic/real_reward"] = rounds_info["per_round"][0]["reward_mean"]
+                        metrics["sampling/downsampled_samples"] = len(final_batch)
+                        metrics["sampling/total_prompts"] = total_prompts
 
-                    if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
-                        if self.reward_fn is None:
-                            raise ValueError("A reward_fn is required for REMAX advantage estimation.")
+                        batch = final_batch
 
-                        with marked_timer("gen_max", timing_raw, color="purple"):
-                            gen_baseline_batch = deepcopy(gen_batch)
-                            gen_baseline_batch.meta_info["do_sample"] = False
+                    else:
+                        with marked_timer("gen", timing_raw, color="red"):
                             if not self.async_rollout_mode:
-                                gen_baseline_output = self.actor_rollout_wg.generate_sequences(gen_baseline_batch)
+                                gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
                             else:
-                                gen_baseline_output = self.async_rollout_manager.generate_sequences(gen_baseline_batch)
-                            batch = batch.union(gen_baseline_output)
-                            reward_baseline_tensor = self.reward_fn(batch)
-                            reward_baseline_tensor = reward_baseline_tensor.sum(dim=-1)
+                                gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch)
 
-                            batch.pop(batch_keys=list(gen_baseline_output.batch.keys()))
+                            timing_raw.update(gen_batch_output.meta_info["timing"])
+                            gen_batch_output.meta_info.pop("timing", None)
 
-                            batch.batch["reward_baselines"] = reward_baseline_tensor
+                        if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
+                            if self.reward_fn is None:
+                                raise ValueError("A reward_fn is required for REMAX advantage estimation.")
 
-                            del gen_baseline_batch, gen_baseline_output
+                            with marked_timer("gen_max", timing_raw, color="purple"):
+                                gen_baseline_batch = deepcopy(gen_batch)
+                                gen_baseline_batch.meta_info["do_sample"] = False
+                                if not self.async_rollout_mode:
+                                    gen_baseline_output = self.actor_rollout_wg.generate_sequences(gen_baseline_batch)
+                                else:
+                                    gen_baseline_output = self.async_rollout_manager.generate_sequences(gen_baseline_batch)
+                                batch = batch.union(gen_baseline_output)
+                                reward_baseline_tensor = self.reward_fn(batch)
+                                reward_baseline_tensor = reward_baseline_tensor.sum(dim=-1)
+
+                                batch.pop(batch_keys=list(gen_baseline_output.batch.keys()))
+
+                                batch.batch["reward_baselines"] = reward_baseline_tensor
+
+                                del gen_baseline_batch, gen_baseline_output
+                    
                     # repeat to align with repeated responses in rollout
                     batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
                     batch = batch.union(gen_batch_output)

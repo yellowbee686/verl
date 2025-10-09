@@ -85,3 +85,11 @@ class AlgoConfig(BaseConfig):
     use_pf_ppo: bool = False
     pf_ppo: dict[str, Any] = field(default_factory=dict)
     filter_groups: Optional[FilterGroupsConfig] = None
+
+    # Reinforce_Ada specific
+    multiround_adaptive_downsampling: bool = False
+    reinforce_ada_choice: str = "balanced"  # or "positive_focused" when multiround_adaptive_downsampling is True
+    positive_threshold: float = 0.7
+    max_rounds: int = 4
+    round_repeat: int = 8
+    global_stat_est: bool = False
