@@ -997,7 +997,7 @@ def compute_policy_loss_archer(
     assert config is not None
     assert not isinstance(config, AlgoConfig)
     clip_ratio_low = config.clip_ratio_low
-    clip_ratio_high = config.clip_ratio_hig
+    clip_ratio_high = config.clip_ratio_high
     clip_ratio_c = config.get("clip_ratio_c", 3.0)
     token_entropy_quantile = config.get("token_entropy_quantile", 0.8)
     masked_entropy = torch.where(response_mask.bool(), entropy.detach(), torch.nan)  # (bsz, response_length)
