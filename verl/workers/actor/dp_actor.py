@@ -376,13 +376,10 @@ class DataParallelPPOActor(BasePPOActor):
         ]
         if self.config.use_kl_loss:
             select_keys.append("ref_log_prob")
-        if self.config.tis_imp_ratio_cap > 0:
-            assert "rollout_log_probs" in data.batch.keys(), (
-                "Truncated Importance Sampling (TIS) requires to configure "
-                "`actor_rollout_ref.rollout.calculate_log_probs=True` "
-                "and is not currently supported in Server mode (agent loop)."
-            )
-            select_keys.append("rollout_log_probs")
+        # Include pre-computed IS weights if present in batch
+        # Weights are computed centrally in trainer and added to batch when algorithm.rollout_is=True
+        if "rollout_is_weights" in data.batch.keys():
+            select_keys.append("rollout_is_weights")
 
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
         non_tensor_select_keys = ["multi_modal_inputs"] if has_multi_modal_inputs else []
@@ -415,7 +412,6 @@ class DataParallelPPOActor(BasePPOActor):
                     model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch}
                     response_mask = model_inputs["response_mask"]
                     old_log_prob = model_inputs["old_log_probs"]
-                    rollout_log_probs = model_inputs["rollout_log_probs"] if self.config.tis_imp_ratio_cap > 0 else None
                     advantages = model_inputs["advantages"]
 
                     entropy_coeff = self.config.entropy_coeff
@@ -442,6 +438,16 @@ class DataParallelPPOActor(BasePPOActor):
                         old_log_prob = model_inputs["old_log_probs"]
 
                     # vanilla -> verl.trainer.ppo.core_algos.compute_policy_loss_vanilla
+
+                    # Extract pre-computed rollout importance sampling weights if present
+                    # Weights are computed centrally in trainer and added when algorithm.rollout_is=True
+                    rollout_is_weights = model_inputs.get("rollout_is_weights", None)
+
+                    # NOTE: Both mismatch diagnostic metrics (PPL, KL, etc.) and IS weight metrics
+                    # are computed centrally in ray_trainer.py for consistency and efficiency.
+                    # This ensures metrics are computed uniformly across all batches at the trainer level
+                    # and avoids redundant computation across workers and micro-batches.
+
                     # gpg -> verl.trainer.ppo.core_algos.compute_policy_loss_gpg
                     # clip_cov -> verl.trainer.ppo.core_algos.compute_policy_loss_clip_cov
                     if is_archer:
@@ -452,7 +458,7 @@ class DataParallelPPOActor(BasePPOActor):
                             response_mask=response_mask,
                             loss_agg_mode=loss_agg_mode,
                             config=self.config,
-                            rollout_log_probs=rollout_log_probs,
+                            rollout_is_weights=rollout_is_weights,
                             entropy=entropy,
                         )
                     else:    
@@ -464,7 +470,7 @@ class DataParallelPPOActor(BasePPOActor):
                             response_mask=response_mask,
                             loss_agg_mode=loss_agg_mode,
                             config=self.config,
-                            rollout_log_probs=rollout_log_probs,
+                            rollout_is_weights=rollout_is_weights,
                         )
 
                     if entropy_coeff != 0:
