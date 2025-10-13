@@ -981,7 +981,7 @@ def compute_policy_loss_archer(
     response_mask: torch.Tensor,
     loss_agg_mode: str = "token-mean",
     config: Optional[DictConfig | AlgoConfig] = None,
-    rollout_log_probs: torch.Tensor | None = None,
+    rollout_is_weights: torch.Tensor | None = None,
     entropy: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
@@ -1030,6 +1030,10 @@ def compute_policy_loss_archer(
 
     pg_losses = torch.where(advantages < 0, negative_pg_losses, positive_pg_losses)
     pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+
+    # Apply rollout importance sampling weights if provided
+    if rollout_is_weights is not None:
+        pg_losses = pg_losses * rollout_is_weights
 
     return pg_loss, pg_clipfrac_upper, pg_clipfrac_lower, negative_pg_clipfrac_dual, positive_pg_clipfrac_dual
 
