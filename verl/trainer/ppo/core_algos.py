@@ -1086,7 +1086,7 @@ def compute_policy_loss_gspo(
     # s_i,t(θ) = sg[s_i(θ)] · π_θ(y_i,t|x, y_i,<t) / sg[π_θ(y_i,t|x, y_i,<t)]
     # In log space: log(s_i,t(θ)) = sg[log(s_i(θ))] + log_prob - sg[log_prob]
     log_seq_importance_ratio = log_prob - log_prob.detach() + negative_approx_kl_seq.detach().unsqueeze(-1)
-    log_seq_importance_ratio = torch.clamp(log_seq_importance_ratio, max=10.0)  # clamp for numerical stability
+    log_seq_importance_ratio = torch.clamp(log_seq_importance_ratio, min=-10.0, max=10.0)  # clamp for numerical stability
 
     # finaly exp() to remove log
     seq_importance_ratio = torch.exp(log_seq_importance_ratio)
@@ -1095,20 +1095,6 @@ def compute_policy_loss_gspo(
     pg_losses2 = -advantages * torch.clamp(seq_importance_ratio, 1 - clip_ratio_low, 1 + clip_ratio_high)
     pg_losses = torch.maximum(pg_losses1, pg_losses2)
 
-    # if config.tis_imp_ratio_cap > 0 and rollout_log_probs is not None:
-    #     # 序列级 log-权重: old / rollout
-    #     tis_log_ratio_seq = torch.sum((old_log_prob - rollout_log_probs) * response_mask, dim=-1) / seq_lengths  # shape: [B]
-    #     # 改为log域截断
-    #     tis_ratio_seq = torch.exp(tis_log_ratio_seq)
-    #     tis_ratio_seq = torch.clamp(tis_ratio_seq, max=config.tis_imp_ratio_cap)
-    #     # tis_log_ratio_seq = torch.clamp(tis_log_ratio_seq, min=-config.tis_imp_ratio_cap, max=config.tis_imp_ratio_cap)
-
-    #     # 广播到 token 维度；重要：不对该权重求梯度
-    #     tis_ratio = tis_ratio_seq.detach().unsqueeze(-1)
-
-    #     # 与 GRPO 一致：在裁剪后乘权，不影响裁剪判定
-    #     pg_losses = pg_losses * tis_ratio
-
     # Apply rollout importance sampling weights if provided
     if rollout_is_weights is not None:
         pg_losses = pg_losses * rollout_is_weights
@@ -1116,9 +1102,10 @@ def compute_policy_loss_gspo(
     # for GSPO, we need to aggregate the loss at the sequence level (seq-mean-token-mean)
     pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
 
-    # For compatibility, return zero for pg_clipfrac_lower (not used in standard GSPO)
-    pg_clipfrac = verl_F.masked_mean(torch.gt(pg_losses2, pg_losses1).float(), response_mask)
-    pg_clipfrac_lower = torch.tensor(0.0, device=pg_loss.device)
+    upper_clipped = torch.gt(seq_importance_ratio, 1 + clip_ratio_high)
+    lower_clipped = torch.lt(seq_importance_ratio, 1 - clip_ratio_low)
+    pg_clipfrac = verl_F.masked_mean(upper_clipped.float(), response_mask)
+    pg_clipfrac_lower = verl_F.masked_mean(lower_clipped.float(), response_mask)
 
     ppo_kl = verl_F.masked_mean(-negative_approx_kl, response_mask)
 
