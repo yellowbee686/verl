@@ -1407,11 +1407,11 @@ class RayPPOTrainer:
 
                     else:
                         with marked_timer("gen", timing_raw, color="red"):
-                            gen_batch = gen_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
+                            gen_batch_output = gen_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
                             if not self.async_rollout_mode:
-                                gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
+                                gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch_output)
                             else:
-                                gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch)
+                                gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
 
                             timing_raw.update(gen_batch_output.meta_info["timing"])
                             gen_batch_output.meta_info.pop("timing", None)

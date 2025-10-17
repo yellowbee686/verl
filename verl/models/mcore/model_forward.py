@@ -113,7 +113,7 @@ def gptmodel_forward_qwen2_5_vl(
         output_orig = model(
             input_ids=input_ids_rmpad,
             attention_mask=None,
-            position_ids=position_ids,
+            position_ids=None,  # model will calculate position_ids
             packed_seq_params=packed_seq_params,
             pixel_values=pixel_values,
             image_grid_thw=image_grid_thw,
@@ -183,7 +183,6 @@ def gptmodel_forward_no_padding(
                 k: preprocess_packed_seqs_no_padding(v, pre_process=True)[0] for k, v in logits_processor_args.items()
             }
             output_dict = logits_processor(output_orig, **args)
-            # print(f'gptmodel_forward_no_padding: {output_dict=}')
             output = {
                 k: postprocess_packed_seqs_no_padding(
                     v, packed_seq_params, input_ids, batch_size, post_process=post_process
