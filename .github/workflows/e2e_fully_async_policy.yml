@@ -12,7 +12,7 @@
 # - `special_sanity`: a suite of quick sanity tests
 # - `special_standalone`: a set of test that are designed to run in dedicated environments
 
-# Accelerators for tests 
+# Accelerators for tests
 # - By default tests are run with GPU available, except for the ones under `special_npu`, and any test script whose name ends with `on_cpu.py`.
 # - For test scripts with `on_cpu.py` name suffix would be tested on CPU resources in linux environment.
 
@@ -29,37 +29,50 @@
 #     - new workflow yaml is added to `.github/workflows`
 #     - new tests are added to workflow mentioned in 2.
 
-name: GPU unit tests
+
+name: e2e_fully_async_policy
 
 on:
   # Trigger the workflow on push or pull request,
   # but only for the main branch
+  # For push, for now only anti-patterns are specified so it is more conservative
+  # and achieves higher coverage.
   push:
     branches:
       - main
-      - v0.4.x
+      - v0.*
     paths:
       - "**/*.py"
-      - .github/workflows/gpu_unit_tests.yml
-  pull_request:
-    branches:
-      - main
-      - v0.4.x
-    paths:
-      # The order that you define paths patterns matters:
-      # A matching negative pattern (prefixed with !) after a positive match will exclude the path.
-      # A matching positive pattern after a negative match will include the path again.
-      - "**/*.py"
+      - "!**/*.md"
+      - "!**/*.sh"
       # Other entrypoints
-      - "!examples/**"
+      - "!examples/*trainer*"
+      - "!tests/**"
       - "!verl/trainer/main_*.py"
       - "!verl/trainer/fsdp_sft_trainer.py"
       - "!recipe/**"
+      - "recipe/fully_async_policy"
+  pull_request:
+    branches:
+      - main
+      - v0.*
+    paths:
+      - "**/*.py"
+      - "!**/*.md"
+      - "!**/*.sh"
+      # Other entrypoints
+      - "!examples/**"
+      - "!tests/**"
+      - "!verl/trainer/main_*.py"
+      - "!verl/trainer/fsdp_sft_trainer.py"
+      # Other recipes
+      - "!recipe/**"
+      # Home
+      - "recipe/fully_async_policy"
       # Entrypoints
-      - .github/workflows/gpu_unit_tests.yml
-      - "tests/**test_*.py"
-      # Ignore CPU tests
-      - "!tests/*_on_cpu.py"
+      - ".github/workflows/e2e_fully_async_policy.yml"
+      - "examples/data_preprocess/gsm8k.py"
+      - "tests/special_e2e/run_fully_async_policy.sh"
 
 # Cancel jobs on the same ref if a new one is triggered
 concurrency:
@@ -67,48 +80,70 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 # Declare permissions just read content.
-permissions: 
+permissions:
   contents: read
 
+env:
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:app-verl0.5-transformers4.55.4-vllm0.10.0-mcore0.13.0-te2.2"
+  DYNAMIC_RUNNER_ENDPOINT: "https://sd10g3clalm04ug7alq90.apigateway-cn-beijing.volceapi.com/runner"
+  TRANSFORMERS_VERSION: "4.56.2"
+
 jobs:
-  gpu_unit_tests:
+  setup:
     if: github.repository_owner == 'volcengine'
-    runs-on: [L20x8]
-    timeout-minutes: 60 # Increase this timeout value as needed
+    runs-on: ubuntu-latest
+    outputs:
+      runner-label: ${{ steps.create-runner.outputs.runner-label }}
+      mlp-task-id: ${{ steps.create-runner.outputs.mlp-task-id }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: create-runner
+        uses: volcengine/vemlp-github-runner@v1
+        with:
+          mode: "create"
+          faas-url: "${{ env.DYNAMIC_RUNNER_ENDPOINT }}"
+          mlp-image: "${{ env.IMAGE }}"
+
+  # Test FSDP2 strategy
+  e2e_fully_async_policy_fsdp2:
+    needs: setup
+    runs-on: [ "${{ needs.setup.outputs.runner-label || 'L20x8' }}" ]
+    timeout-minutes: 10 # Increase timeout for async training
     env:
       HTTP_PROXY: ${{ secrets.PROXY_HTTP }}
       HTTPS_PROXY: ${{ secrets.PROXY_HTTPS }}
-      NO_PROXY: "localhost,127.0.0.1"
-      HF_HUB_ENABLE_HF_TRANSFER: 1
-    container:
-      image: verlai/verl:app-verl0.6-transformers4.56.1-sglang0.5.2-mcore0.13.0-te2.2
-      options: --gpus all --shm-size=10g
+      NO_PROXY: "localhost,127.0.0.1,hf-mirror.com"
+      HF_ENDPOINT: "https://hf-mirror.com"
+      HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      ACTOR_STRATEGY: "fsdp2"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-            fetch-depth: 0
+          fetch-depth: 0
       - name: Install the current repository
         run: |
-          pip3 install hf_transfer
-          pip3 install --no-deps -e .[test]
-          pip3 install --upgrade "ray>=2.40.0"
-          pip3 install cupy-cuda12x
-          pip3 install mlflow
-      - name: Download Model to Use
+          pip3 install --no-deps -e .[test,gpu]
+          pip3 install transformers==$TRANSFORMERS_VERSION
+      - name: Prepare GSM8K dataset
         run: |
-          huggingface-cli download Qwen/Qwen2.5-0.5B-Instruct
-          huggingface-cli download Qwen/Qwen2.5-1.5B-Instruct
-          export HF_HUB_OFFLINE=1
-        # Disable requests to avoid network errors
-      - name: Run all GPU unit tests
+          python3 examples/data_preprocess/gsm8k.py --local_dataset_path ${HOME}/models/hf_data/gsm8k
+      - name: Running the E2E test with fully_async_policy algorithm (FSDP2)
         run: |
-          pytest -s -x --ignore-glob="*test_special_*.py" --ignore-glob='*on_cpu.py' --ignore-glob="*test_vllm*" --ignore-glob="*_sglang*" --ignore-glob="*_hf_rollout*" --ignore-glob="tests/models/" --ignore-glob='tests/special*' --ignore-glob="tests/experimental" --ignore-glob="tests/workers/reward_model" tests/
-      - name: Testing LinearCrossEntropyTP Correctness, Computation Time and Memory Consumption
-        run: |
-          LOW_MEMORY=True torchrun --standalone --nnodes=1 --nproc-per-node=8 tests/utils/test_special_linear_cross_entropy_tp.py
-      - name: Testing FSDP2 actor functionality
-        run: |
-          torchrun --standalone --nnodes=1 --nproc-per-node=2 tests/workers/actor/test_special_dp_actor.py
-      - name: Testing FSDP2 critic functionality
-        run: |
-          torchrun --standalone --nnodes=1 --nproc-per-node=2 tests/workers/critic/test_special_dp_critic.py
+          ray stop --force
+          bash tests/special_e2e/run_fully_async_policy.sh
+
+  cleanup:
+    runs-on: ubuntu-latest
+    needs:
+      [
+        setup,
+        e2e_fully_async_policy_fsdp2
+      ]
+    if: always()
+    steps:
+      - id: destroy-runner
+        uses: volcengine/vemlp-github-runner@v1
+        with:
+          mode: "destroy"
+          faas-url: "${{ env.DYNAMIC_RUNNER_ENDPOINT }}"
+          mlp-task-id: "${{ needs.setup.outputs.mlp-task-id }}"
