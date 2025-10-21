@@ -320,7 +320,9 @@ def compute_grpo_outcome_advantage(
                 raise ValueError(f"no score in prompt index: {idx}")
         for i in range(bsz):
             if norm_adv_by_std_in_grpo:
-                scores[i] = (scores[i] - id2mean[index[i]]) / (id2std[index[i]] + epsilon)
+                std_clip_threshold = config.std_clip_threshold
+                safe_std = torch.clamp(id2std[index[i]] + epsilon, min=std_clip_threshold)
+                scores[i] = (scores[i] - id2mean[index[i]]) / safe_std
             else:
                 scores[i] = scores[i] - id2mean[index[i]]
         scores = scores.unsqueeze(-1) * response_mask

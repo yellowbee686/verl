@@ -76,6 +76,7 @@ algorithm:
 
   # Whether to normalize advantages by std (specific to GRPO)
   norm_adv_by_std_in_grpo: True
+  std_clip_threshold: 0.333
 
   # Reinforce_Ada specific
   multiround_adaptive_downsampling: False

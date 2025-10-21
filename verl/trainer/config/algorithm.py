@@ -67,6 +67,7 @@ class AlgoConfig(BaseConfig):
         lam (float): Trade-off between bias and variance in the GAE estimator.
         adv_estimator (str): Advantage estimator type: "gae", "grpo", "reinforce_plus_plus", etc.
         norm_adv_by_std_in_grpo (bool): Whether to normalize advantages by std (specific to GRPO).
+        std_clip_threshold (float): Lower bound threshold for clipping the std of advantages.
         use_kl_in_reward (bool): Whether to enable in-reward KL penalty.
         kl_penalty (str): How to estimate KL divergence: "kl", "abs", "mse", "low_var_kl", or "full".
         kl_ctrl (KLControlConfig): KL control configuration.
@@ -87,6 +88,7 @@ class AlgoConfig(BaseConfig):
     lam: float = 1.0
     adv_estimator: str = "gae"
     norm_adv_by_std_in_grpo: bool = True
+    std_clip_threshold: float = 0.333
     use_kl_in_reward: bool = False
     kl_penalty: str = "kl"
     kl_ctrl: KLControlConfig = field(default_factory=KLControlConfig)
