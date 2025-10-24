@@ -454,6 +454,8 @@ class RayPPOTrainer:
         for k, v in reward_extra_infos_dict.items():
             print(f"reward_extra_infos_dict: {k=}, {v=}")
             if len(v) == n:
+                if isinstance(v, np.ndarray):
+                    v = v.tolist()
                 base_data[k] = v
 
         lines = []
