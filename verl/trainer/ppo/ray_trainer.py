@@ -452,6 +452,7 @@ class RayPPOTrainer:
         }
 
         for k, v in reward_extra_infos_dict.items():
+            print(f"reward_extra_infos_dict: {k=}, {v=}")
             if len(v) == n:
                 base_data[k] = v
 
