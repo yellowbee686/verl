@@ -524,7 +524,7 @@ class AgentLoopWorkerBase:
                 output.reward_score = result["reward_score"]
                 output.extra_fields["reward_extra_info"] = result["reward_extra_info"]
 
-            return _InternalAgentLoopOutput(
+            result = _InternalAgentLoopOutput(
                 prompt_ids=prompt_output["input_ids"],
                 response_ids=response_output["input_ids"],
                 input_ids=input_ids,
@@ -539,20 +539,78 @@ class AgentLoopWorkerBase:
                 metrics=output.metrics,
                 extra_fields=output.extra_fields,
             )
+            
+            # Clear temporary variables to free memory immediately
+            del prompt_output, response_output, response_mask_output
+            if response_logprobs is not None:
+                del output.response_logprobs
+            
+            return result
 
     def _postprocess(self, inputs: list[_InternalAgentLoopOutput]) -> DataProto:
         """Process the padded outputs from _run_agent_loop and combine them into a batch."""
         # Convert lists back to tensors and stack them to create a batch.
-        prompt_ids = torch.cat([input.prompt_ids for input in inputs], dim=0)
-        response_ids = torch.cat([input.response_ids for input in inputs], dim=0)
-        response_mask = torch.cat([input.response_mask for input in inputs], dim=0)
-        attention_mask = torch.cat([input.attention_mask for input in inputs], dim=0)
-        input_ids = torch.cat([input.input_ids for input in inputs], dim=0)
-        position_ids = torch.cat([input.position_ids for input in inputs], dim=0)
+        # Strategy: Extract and concatenate one field at a time, then immediately clear references
+        # to reduce peak memory usage during concatenation
+        
+        prompt_ids_list = [input.prompt_ids for input in inputs]
+        prompt_ids = torch.cat(prompt_ids_list, dim=0)
+        # Clear individual tensor references immediately after concatenation
+        for input in inputs:
+            input.prompt_ids = None
+        del prompt_ids_list
+        
+        response_ids_list = [input.response_ids for input in inputs]
+        response_ids = torch.cat(response_ids_list, dim=0)
+        for input in inputs:
+            input.response_ids = None
+        del response_ids_list
+        
+        response_mask_list = [input.response_mask for input in inputs]
+        response_mask = torch.cat(response_mask_list, dim=0)
+        for input in inputs:
+            input.response_mask = None
+        del response_mask_list
+        
+        attention_mask_list = [input.attention_mask for input in inputs]
+        attention_mask = torch.cat(attention_mask_list, dim=0)
+        for input in inputs:
+            input.attention_mask = None
+        del attention_mask_list
+        
+        input_ids_list = [input.input_ids for input in inputs]
+        input_ids = torch.cat(input_ids_list, dim=0)
+        for input in inputs:
+            input.input_ids = None
+        del input_ids_list
+        
+        position_ids_list = [input.position_ids for input in inputs]
+        position_ids = torch.cat(position_ids_list, dim=0)
+        for input in inputs:
+            input.position_ids = None
+        del position_ids_list
+        
         optional_outputs = {}
         if inputs[0].response_logprobs is not None:
-            optional_outputs["rollout_log_probs"] = torch.cat([input.response_logprobs for input in inputs], dim=0)
+            rollout_log_probs_list = [input.response_logprobs for input in inputs]
+            optional_outputs["rollout_log_probs"] = torch.cat(rollout_log_probs_list, dim=0)
+            for input in inputs:
+                input.response_logprobs = None
+            del rollout_log_probs_list
 
+        # Ensure all tensors are contiguous to avoid extra memory allocation during GPU transfer
+        # Non-contiguous tensors require PyTorch to create a contiguous copy during .to(device)
+        # which doubles the peak memory usage during transfer
+        prompt_ids = prompt_ids.contiguous()
+        response_ids = response_ids.contiguous()
+        response_mask = response_mask.contiguous()
+        attention_mask = attention_mask.contiguous()
+        input_ids = input_ids.contiguous()
+        position_ids = position_ids.contiguous()
+        
+        if "rollout_log_probs" in optional_outputs:
+            optional_outputs["rollout_log_probs"] = optional_outputs["rollout_log_probs"].contiguous()
+        
         batch = TensorDict(
             {
                 "prompts": prompt_ids,  # [bsz, prompt_length]
@@ -761,6 +819,10 @@ class AgentLoopManager:
             ]
         )
         output = DataProto.concat(outputs)
+        
+        # Clear intermediate outputs to free memory
+        del chunkes
+        
         if self.config.actor_rollout_ref.rollout.free_cache_engine:
             self.sleep()
         if self.reward_model_manager and self.config.reward_model.rollout.free_cache_engine:
@@ -771,6 +833,10 @@ class AgentLoopManager:
         timing = self._performance_metrics(metrics, output)
 
         output.meta_info = {"timing": timing, **outputs[0].meta_info}
+        
+        # Clear outputs list after concatenation
+        del outputs
+        
         return output
 
     def _performance_metrics(self, metrics: list[list[dict[str, str]]], output: DataProto) -> dict[str, float]:
