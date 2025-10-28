@@ -105,6 +105,7 @@ class AdvantageEstimator(str, Enum):
     GPG = "gpg"
     RLOO_VECTORIZED = "rloo_vectorized"
     GRPO_VECTORIZED = "grpo_vectorized"
+    TEACHER_LOGPROB = "teacher_logprob"
 
 
 ADV_ESTIMATOR_REGISTRY: dict[str, Any] = {}
@@ -760,6 +761,35 @@ def compute_rloo_vectorized_outcome_advantage(
     return adv, adv
 
 
+@register_adv_est("teacher_logprob")
+def compute_teacher_logprob_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: np.ndarray,
+    epsilon: float = 1e-6,
+    config: Optional[AlgoConfig] = None,
+    **kwargs,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Pass-through advantage for on-policy distillation.
+
+    Args:
+        token_level_rewards: `(torch.Tensor)` teacher token-level log-prob, shape (bs, response_length)
+        response_mask: `(torch.Tensor)` mask (bs, response_length)
+        index: `(np.ndarray)` unused
+        epsilon: `(float)` unused
+        config: `(AlgoConfig)` unused
+
+    Returns:
+        advantages: `(torch.Tensor)` same as token_level_rewards
+        returns: `(torch.Tensor)` same as token_level_rewards
+    """
+    # Do not normalize/whiten; keep teacher signal intact for distillation
+    with torch.no_grad():
+        advantages = token_level_rewards
+    return advantages, advantages
+
+
 def compute_rewards(token_level_scores, old_log_prob, ref_log_prob, kl_ratio):
     """Compute token-level rewards with KL penalty.
 
@@ -976,6 +1006,57 @@ def compute_policy_loss_vanilla(
     pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
 
     return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower
+
+
+@register_policy_loss("reverse_kl")  # type: ignore[arg-type]
+def compute_policy_loss_reverse_kl(
+    old_log_prob: torch.Tensor,
+    log_prob: torch.Tensor,
+    advantages: torch.Tensor,
+    response_mask: torch.Tensor,
+    loss_agg_mode: str = "token-mean",
+    config: Optional[DictConfig | AlgoConfig] = None,
+    rollout_is_weights: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    On-policy distillation loss using (approximate) reverse-KL objective.
+
+    This implements a PPO-style policy gradient where the per-token weight is the
+    teacher log-probability. Specifically, we maximize E_{\pi_\theta}[log \pi_T],
+    which corresponds to minimizing KL(\pi_\theta || \pi_T) up to the student-entropy term.
+
+    Inputs:
+        old_log_prob: `(torch.Tensor)` log-prob under behavior policy (bs, T)
+        log_prob: `(torch.Tensor)` log-prob under current student (bs, T)
+        advantages: `(torch.Tensor)` teacher token log-prob (bs, T)
+        response_mask: `(torch.Tensor)` mask (bs, T)
+        loss_agg_mode: `(str)` aggregation mode
+        config: `(ActorConfig | DictConfig)` actor config (for clip params)
+        rollout_is_weights: optional IS weights for fully-async rollout
+
+    Returns:
+        Tuple of (pg_loss, pg_clipfrac_upper, approx_ppo_kl, pg_clipfrac_lower)
+    """
+
+    # On-policy distill (no clipping). Following importance_sampling in Tinker docs:
+    # advantages = teacher_logprobs - sampled_logprobs = -(reverse_kl)
+    # Here advantages input is teacher_logprobs, so construct A on the fly.
+    teacher_log_prob = advantages.detach()
+    policy_advantage = teacher_log_prob - log_prob
+
+    # On-policy => ratio ~= 1, so plain REINFORCE form without ratio is sufficient
+    pg_losses = -policy_advantage
+
+    # Apply rollout importance sampling weights if provided
+    if rollout_is_weights is not None:
+        pg_losses = pg_losses * rollout_is_weights
+
+    pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+
+    reverse_kl = verl_F.masked_mean((log_prob - teacher_log_prob), response_mask)
+    zero_scalar = torch.zeros((), dtype=pg_loss.dtype, device=pg_loss.device)
+
+    return pg_loss, zero_scalar, reverse_kl, zero_scalar
 
 
 @register_policy_loss("archer")
