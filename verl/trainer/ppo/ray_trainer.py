@@ -455,15 +455,23 @@ class RayPPOTrainer:
         }
 
         for k, v in reward_extra_infos_dict.items():
-            print(f"reward_extra_infos_dict: {k=}, {v=}")
+            print(f"reward_extra_infos_dict: {k=}, len:{len(v)}, v:{v[0:3]}")
+            if isinstance(v, np.ndarray):
+                v = v.tolist()
             if len(v) == n:
-                if isinstance(v, np.ndarray):
-                    v = v.tolist()
                 base_data[k] = v
 
         lines = []
         for i in range(n):
-            entry = {k: v[i] for k, v in base_data.items()}
+            entry = {}
+            for k, v in base_data.items():
+                value = v[i]
+                # Convert numpy types to Python native types for JSON serialization
+                if isinstance(value, (np.integer, np.floating)):
+                    value = float(value) if isinstance(value, np.floating) else int(value)
+                elif isinstance(value, np.ndarray):
+                    value = value.tolist()
+                entry[k] = value
             lines.append(json.dumps(entry, ensure_ascii=False))
 
         with open(filename, "w") as f:
