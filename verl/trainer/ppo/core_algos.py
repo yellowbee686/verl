@@ -1104,13 +1104,17 @@ def compute_policy_loss_archer(
 
     negative_dual_clip_ratio = torch.clamp(negative_clip_ratio, min=None, max=clip_ratio_c)
     negative_clipped_mask = torch.gt(negative_clip_ratio, negative_dual_clip_ratio)
-    negative_pg_clipfrac_dual = verl_F.masked_mean(negative_clipped_mask.float(), response_mask & (advantages < 0))
+    negative_pg_clipfrac_dual = verl_F.masked_mean(
+        negative_clipped_mask.float(), response_mask_bool & (advantages < 0)
+    )
     negative_pg_losses_dual = -advantages * negative_dual_clip_ratio.detach() * log_prob
     negative_pg_losses = torch.where(negative_clipped_mask, negative_pg_losses_dual, negative_pg_losses_clip)
 
     positive_dual_clip_ratio = torch.clamp(1/positive_clip_ratio, min=None, max=clip_ratio_c)
     positive_clipped_mask = torch.gt(1/positive_clip_ratio, positive_dual_clip_ratio)
-    positive_pg_clipfrac_dual = verl_F.masked_mean(positive_clipped_mask.float(), response_mask & (advantages > 0))
+    positive_pg_clipfrac_dual = verl_F.masked_mean(
+        positive_clipped_mask.float(), response_mask_bool & (advantages > 0)
+    )
     positive_pg_losses_dual = -advantages * positive_dual_clip_ratio.detach() * log_prob
     positive_pg_losses = torch.where(positive_clipped_mask, positive_pg_losses_dual, positive_pg_losses_clip)
 
