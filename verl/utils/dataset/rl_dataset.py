@@ -367,9 +367,13 @@ class RLHFDataset(Dataset):
             raw_prompt = self.tokenizer.apply_chat_template(
                 messages, add_generation_prompt=True, tokenize=False, **self.apply_chat_template_kwargs
             )
-            model_inputs = self.tokenizer(raw_prompt, return_tensors="pt", add_special_tokens=False)
-            input_ids = model_inputs.pop("input_ids")
-            attention_mask = model_inputs.pop("attention_mask")
+        model_inputs = self.tokenizer(raw_prompt, return_tensors="pt", add_special_tokens=False)
+        input_ids = model_inputs.pop("input_ids")
+        attention_mask = model_inputs.pop("attention_mask")
+
+        # capture the input_ids before postprocess_data (which adds padding)
+        # these ids contain the correct expanded image tokens for Qwen2-VL
+        raw_prompt_ids = input_ids[0].tolist()
 
         input_ids, attention_mask = verl_F.postprocess_data(
             input_ids=input_ids,
@@ -420,7 +424,7 @@ class RLHFDataset(Dataset):
         row_dict["attention_mask"] = attention_mask[0]
         row_dict["position_ids"] = position_ids[0]
 
-        raw_prompt_ids = self.tokenizer.encode(raw_prompt, add_special_tokens=False)
+        # raw_prompt_ids = self.tokenizer.encode(raw_prompt, add_special_tokens=False)
         if len(raw_prompt_ids) > self.max_prompt_length:
             if self.truncation == "left":
                 raw_prompt_ids = raw_prompt_ids[-self.max_prompt_length :]
