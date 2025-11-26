@@ -456,7 +456,6 @@ class RayPPOTrainer:
         }
 
         for k, v in reward_extra_infos_dict.items():
-            print(f"reward_extra_infos_dict: {k=}, len:{len(v)}, v:{v[0:3]}")
             if isinstance(v, np.ndarray):
                 v = v.tolist()
             if len(v) == n:
@@ -664,6 +663,7 @@ class RayPPOTrainer:
             )
 
         for key_info, lst in reward_extra_infos_dict.items():
+            print(f"reward_extra_infos_dict: {key_info=}, len:{len(lst)}, lst:{lst[0:3]}")
             assert len(lst) == 0 or len(lst) == len(sample_scores), f"{key_info}: {len(lst)=}, {len(sample_scores)=}"
 
         data_sources = np.concatenate(data_source_lst, axis=0)
