@@ -93,6 +93,8 @@ from verl.workers.sharding_manager.fsdp_ulysses import FSDPUlyssesShardingManage
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
+from utils.log_utils import logger as local_logger
+
 device_name = get_device_name()
 
 
@@ -910,6 +912,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         assert self._is_rollout
         prompts = prompts.to(get_device_id())
 
+        local_logger.info(f"Start generate sequences")
         meta_info = {
             "eos_token_id": self.generation_config.eos_token_id
             if self.generation_config is not None
@@ -926,13 +929,14 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             loop.run_until_complete(self.rollout_mode())
             log_gpu_memory_usage("After switch to rollout mode", logger=logger)
 
+        local_logger.info(f"after rollout_mode in ")
         with simple_timer("generate_sequences", timing_generate):
             output = self.rollout.generate_sequences(prompts=prompts)
 
         if self._is_actor:
             loop.run_until_complete(self.trainer_mode())
             log_gpu_memory_usage("After switch to trainer mode", logger=logger)
-
+        local_logger.info(f"after trainer_mode in generate_sequences")
         # We calculate the average timing across all ranks
         # to make sure meta_info["timing"] is the same
         timing_generate_topk_ratio, timing_generate_min, timing_generate_max = topk_reduce_ratio_min_max(

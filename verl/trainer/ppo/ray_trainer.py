@@ -1335,6 +1335,7 @@ class RayPPOTrainer:
             for batch_dict in self.train_dataloader:
                 metrics = {}
                 timing_raw = {}
+                local_logger.info(f"Start step {self.global_steps}")
 
                 with marked_timer("start_profile", timing_raw):
                     self._start_profiling(
@@ -1415,6 +1416,7 @@ class RayPPOTrainer:
                         batch = final_batch
 
                     else:
+                        local_logger.info(f"Start gen")
                         with marked_timer("gen", timing_raw, color="red"):
                             gen_batch_output = gen_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
                             if not self.async_rollout_mode:
@@ -1456,11 +1458,8 @@ class RayPPOTrainer:
                     # NOTE: This usually changes the order of data in the `batch`,
                     # which won't affect the advantage calculation (since it's based on uid),
                     # but might affect the loss calculation (due to the change of mini-batching).
-                    before_balance_batch = time.time()
                     if self.config.trainer.balance_batch:
                         self._balance_batch(batch, metrics=metrics)
-                    after_balance_batch = time.time()
-                    local_logger.info(f"Balance batch time: {after_balance_batch - before_balance_batch:.1f} seconds")
                     # compute global_valid tokens
                     batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
 
@@ -1470,6 +1469,7 @@ class RayPPOTrainer:
                             reward_tensor = self.rm_wg.compute_rm_score(batch)
                             batch = batch.union(reward_tensor)
 
+                        local_logger.info(f"Start compute reward")
                         if self.config.reward_model.launch_reward_fn_async:
                             future_reward = compute_reward_async.remote(
                                 data=batch, config=self.config, tokenizer=self.tokenizer
@@ -1589,6 +1589,7 @@ class RayPPOTrainer:
                     # implement critic warmup
                     if self.config.trainer.critic_warmup <= self.global_steps:
                         # update actor
+                        local_logger.info(f"Start update actor")
                         with marked_timer("update_actor", timing_raw, color="red"):
                             rollout_config = self.config.actor_rollout_ref.rollout
                             batch.meta_info["multi_turn"] = rollout_config.multi_turn.enable
@@ -1597,6 +1598,7 @@ class RayPPOTrainer:
                             actor_output = self.actor_rollout_wg.update_actor(batch)
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)
+                        local_logger.info(f"End update actor")
 
                     # Log rollout generations if enabled
                     rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
@@ -1673,7 +1675,7 @@ class RayPPOTrainer:
 
                 # TODO: make a canonical logger that supports various backend
                 logger.log(data=metrics, step=self.global_steps)
-
+                local_logger.info(f"End step {self.global_steps}")
                 progress_bar.update(1)
                 self.global_steps += 1
 
