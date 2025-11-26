@@ -929,10 +929,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             loop.run_until_complete(self.rollout_mode())
             log_gpu_memory_usage("After switch to rollout mode", logger=logger)
 
-        local_logger.info(f"after rollout_mode in ")
+        local_logger.info(f"after rollout_mode in generate_sequences")
         with simple_timer("generate_sequences", timing_generate):
             output = self.rollout.generate_sequences(prompts=prompts)
-
+        local_logger.info(f"start trainer_mode in generate_sequences")
         if self._is_actor:
             loop.run_until_complete(self.trainer_mode())
             log_gpu_memory_usage("After switch to trainer mode", logger=logger)
