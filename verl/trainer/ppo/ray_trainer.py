@@ -74,6 +74,8 @@ from verl.trainer.ppo.reinforce_ada_utils import (
     compute_seq_rewards_for_round,
 )
 
+from utils.log_utils import logger
+
 @dataclass
 class ResourcePoolManager:
     """
@@ -1454,9 +1456,11 @@ class RayPPOTrainer:
                     # NOTE: This usually changes the order of data in the `batch`,
                     # which won't affect the advantage calculation (since it's based on uid),
                     # but might affect the loss calculation (due to the change of mini-batching).
+                    before_balance_batch = time.time()
                     if self.config.trainer.balance_batch:
                         self._balance_batch(batch, metrics=metrics)
-
+                    after_balance_batch = time.time()
+                    logger.info(f"Balance batch time: {after_balance_batch - before_balance_batch:.1f} seconds")
                     # compute global_valid tokens
                     batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
 
@@ -1489,7 +1493,10 @@ class RayPPOTrainer:
                         )
                     else:  # Recompute old_log_probs
                         with marked_timer("old_log_prob", timing_raw, color="blue"):
+                            before_compute_log_prob = time.time()
                             old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
+                            after_compute_log_prob = time.time()
+                            logger.info(f"Compute log prob time: {after_compute_log_prob - before_compute_log_prob:.1f} seconds")
                             entropys = old_log_prob.batch["entropys"]
                             response_masks = batch.batch["response_mask"]
                             loss_agg_mode = self.config.actor_rollout_ref.actor.loss_agg_mode
