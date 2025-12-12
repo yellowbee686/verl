@@ -38,6 +38,7 @@ class SingleTurnAgentLoop(AgentLoopBase):
     async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput:
         debug_enabled = os.getenv("VERL_ROLLOUT_DEBUG", "0").lower() in ("1", "true", "yes", "y", "on")
         debug_verbose = os.getenv("VERL_ROLLOUT_DEBUG_VERBOSE", "0").lower() in ("1", "true", "yes", "y", "on")
+        debug_sample_n = int(os.getenv("VERL_ROLLOUT_DEBUG_SAMPLE_N", "200"))
 
         t_start = time.perf_counter()
         messages = list(kwargs["raw_prompt"])
@@ -83,6 +84,14 @@ class SingleTurnAgentLoop(AgentLoopBase):
         t_after_vllm = time.perf_counter()
 
         if debug_enabled:
+            should_log = debug_verbose
+            if not should_log and debug_sample_n > 0:
+                # Stable sampling without RNG to avoid extra overhead.
+                try:
+                    should_log = (int(request_id[:8], 16) % debug_sample_n) == 0
+                except Exception:
+                    should_log = False
+
             if image_data is None:
                 num_images = 0
             elif isinstance(image_data, list):
@@ -96,31 +105,23 @@ class SingleTurnAgentLoop(AgentLoopBase):
             t_vllm_ms = (t_after_vllm - t_before_vllm) * 1000.0
             t_total_ms = (t_after_vllm - t_start) * 1000.0
 
-            if debug_verbose:
+            if should_log:
                 logger.info(
                     "[rollout_debug][single_turn] request_id=%s prompt_tokens=%s images=%s "
+                    "cfg_response_len=%s cfg_max_model_len=%s "
                     "t_copy_ms=%.1f t_template_ms=%.1f t_processor_ms=%.1f t_vllm_ms=%.1f t_total_ms=%.1f "
                     "sampling=%s",
                     request_id,
                     len(prompt_ids),
                     num_images,
+                    self.response_length,
+                    self.prompt_length + self.response_length,
                     t_copy_ms,
                     t_template_ms,
                     t_processor_ms,
                     t_vllm_ms,
                     t_total_ms,
                     {k: sampling_params.get(k) for k in ("temperature", "top_p", "top_k", "logprobs")},
-                )
-            else:
-                logger.info(
-                    "[rollout_debug][single_turn] request_id=%s prompt_tokens=%s images=%s "
-                    "t_prepare_ms=%.1f t_vllm_ms=%.1f t_total_ms=%.1f",
-                    request_id,
-                    len(prompt_ids),
-                    num_images,
-                    (t_before_vllm - t_start) * 1000.0,
-                    t_vllm_ms,
-                    t_total_ms,
                 )
 
         response_mask = [1] * len(output.token_ids)
