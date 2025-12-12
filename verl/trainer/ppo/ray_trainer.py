@@ -1309,6 +1309,7 @@ class RayPPOTrainer:
         validate_tensordict_performance(final_batch, context="final_batch")
 
         return final_batch, rounds_info
+
     def _compute_ref_log_prob(self, batch: DataProto) -> DataProto:
         if self.use_legacy_worker_impl == "disable":
             # step 1: convert dataproto to tensordict.

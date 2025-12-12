@@ -107,7 +107,7 @@ def get_custom_reward_fn(config: DictConfig) -> Optional[RawRewardFn]:
     if not hasattr(module, function_name):
         raise AttributeError(f"Reward function '{function_name}' not found in '{module.__file__}'.")
 
-    print(f"using customized reward function '{function_name}' from '{module.__file__}'")
+    # print(f"using customized reward function '{function_name}' from '{module.__file__}'")
     raw_fn = getattr(module, function_name)
 
     reward_kwargs = dict(reward_fn_config.get("reward_kwargs", {}))
