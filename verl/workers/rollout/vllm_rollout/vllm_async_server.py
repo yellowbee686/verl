@@ -208,14 +208,6 @@ class vLLMHttpServerBase:
         self._rollout_debug_log_interval_sec = float(os.getenv("VERL_ROLLOUT_DEBUG_LOG_INTERVAL_SEC", "10"))
         self._rollout_debug_log_every_n = int(os.getenv("VERL_ROLLOUT_DEBUG_LOG_EVERY_N", "200"))
         self._rollout_debug_latency_buf_size = int(os.getenv("VERL_ROLLOUT_DEBUG_LAT_BUF", "512"))
-        self._rollout_debug_sample_n = int(os.getenv("VERL_ROLLOUT_DEBUG_SAMPLE_N", "200"))
-        self._cap_max_tokens_to_response_len = os.getenv("VERL_VLLM_CAP_MAX_TOKENS_TO_RESPONSE_LEN", "0").lower() in (
-            "1",
-            "true",
-            "yes",
-            "y",
-            "on",
-        )
 
         self._req_total: int = 0
         self._req_completed: int = 0
@@ -359,21 +351,6 @@ class vLLMHttpServerBase:
         }
 
         if self._rollout_debug_enabled:
-            logger.info(
-                "[rollout_debug][vllm_server_cfg] replica_rank=%s node_rank=%s max_model_len=%s "
-                "prompt_length=%s response_length=%s max_num_seqs=%s max_num_batched_tokens=%s "
-                "enable_chunked_prefill=%s cap_max_tokens_to_response_len=%s",
-                self.replica_rank,
-                self.node_rank,
-                self.config.max_model_len,
-                self.config.prompt_length,
-                self.config.response_length,
-                self.config.max_num_seqs,
-                self.config.max_num_batched_tokens,
-                self.config.enable_chunked_prefill,
-                self._cap_max_tokens_to_response_len,
-            )
-
             # When max_num_batched_tokens <= max_model_len, chunked prefill usually cannot batch
             # multiple long prompts, which often leads to low GPU utilization.
             if self.config.max_num_batched_tokens <= self.config.max_model_len:
@@ -548,55 +525,7 @@ class vLLMHttpServerBase:
                 self._maybe_log_request_stats()
 
         # TODO(@wuxibin): switch to `/generate` http endpoint once multi-modal support ready.
-        remaining_ctx = self.config.max_model_len - len(prompt_ids)
-        max_tokens = remaining_ctx
-        if self._cap_max_tokens_to_response_len:
-            max_tokens = min(self.config.response_length, remaining_ctx)
-
-        if max_tokens <= 0:
-            logger.error(
-                "[rollout_debug][vllm_server] invalid max_tokens request_id=%s prompt_len=%s max_model_len=%s "
-                "remaining_ctx=%s response_length=%s cap=%s",
-                request_id,
-                len(prompt_ids),
-                self.config.max_model_len,
-                remaining_ctx,
-                self.config.response_length,
-                self._cap_max_tokens_to_response_len,
-            )
-            if debug_enabled:
-                self._req_failed += 1
-            return TokenOutput(token_ids=[], log_probs=None, routed_experts=None, stop_reason="error")
-
-        if debug_enabled:
-            should_log = self._rollout_debug_verbose
-            if not should_log and self._rollout_debug_sample_n > 0:
-                try:
-                    should_log = (int(request_id[:8], 16) % self._rollout_debug_sample_n) == 0
-                except Exception:
-                    should_log = False
-
-            if should_log:
-                logger.info(
-                    "[rollout_debug][vllm_server] request_id=%s prompt_len=%s remaining_ctx=%s "
-                    "cfg_response_len=%s computed_max_tokens=%s cap=%s",
-                    request_id,
-                    len(prompt_ids),
-                    remaining_ctx,
-                    self.config.response_length,
-                    max_tokens,
-                    self._cap_max_tokens_to_response_len,
-                )
-            elif max_tokens > (self.config.response_length * 2):
-                # Avoid flooding: warn only occasionally via the stats logger gate.
-                logger.warning(
-                    "[rollout_debug][vllm_server] max_tokens (%s) >> response_length (%s). "
-                    "This can cause very long decode and poor throughput. "
-                    "Set VERL_VLLM_CAP_MAX_TOKENS_TO_RESPONSE_LEN=1 to cap.",
-                    max_tokens,
-                    self.config.response_length,
-                )
-
+        max_tokens = self.config.max_model_len - len(prompt_ids)
         sampling_params["logprobs"] = 0 if sampling_params.pop("logprobs", False) else None
         sampling_params.setdefault("repetition_penalty", self.config.get("repetition_penalty", 1.0))
         try:
