@@ -16,7 +16,9 @@ import heapq
 import logging
 import os
 import random
+import time
 from abc import ABC, abstractmethod
+from collections import deque
 from typing import Any, Optional
 from uuid import uuid4
 
@@ -69,6 +71,26 @@ class AsyncLLMServerManager:
         self.server_handles = server_handles
         random.shuffle(self.server_handles)
 
+        self._debug_enabled = os.getenv("VERL_ROLLOUT_DEBUG", "0").lower() in ("1", "true", "yes", "y", "on")
+        self._debug_verbose = os.getenv("VERL_ROLLOUT_DEBUG_VERBOSE", "0").lower() in ("1", "true", "yes", "y", "on")
+        self._debug_log_interval_sec = float(os.getenv("VERL_ROLLOUT_DEBUG_LOG_INTERVAL_SEC", "10"))
+        self._debug_log_every_n = int(os.getenv("VERL_ROLLOUT_DEBUG_LOG_EVERY_N", "200"))
+        self._debug_latency_buf_size = int(os.getenv("VERL_ROLLOUT_DEBUG_LAT_BUF", "512"))
+
+        self._server_handle_to_idx: dict[ray.actor.ActorHandle, int] = {
+            server: i for i, server in enumerate(self.server_handles)
+        }
+
+        # Lightweight client-side request stats for debugging rollout stalls / low GPU utilization.
+        self._req_sent: int = 0
+        self._req_completed: int = 0
+        self._req_failed: int = 0
+        self._req_inflight_total: int = 0
+        self._req_inflight_by_server: dict[str, int] = {}
+        self._latency_ms_recent: deque[float] = deque(maxlen=max(1, self._debug_latency_buf_size))
+        self._last_log_ts: float = 0.0
+        self._last_log_completed: int = 0
+
         # Least requests load balancing
         self.weighted_serveres = [[0, (hash(server), server)] for server in server_handles]
         heapq.heapify(self.weighted_serveres)
@@ -86,6 +108,47 @@ class AsyncLLMServerManager:
         heapq.heapreplace(self.weighted_serveres, self.weighted_serveres[0])
         self.request_id_to_server[request_id] = server
         return server
+
+    def _server_key(self, server: ray.actor.ActorHandle) -> str:
+        idx = self._server_handle_to_idx.get(server, -1)
+        return str(idx)
+
+    def _maybe_log_client_stats(self, *, force: bool = False) -> None:
+        if not self._debug_enabled:
+            return
+
+        now = time.perf_counter()
+        completed_delta = self._req_completed - self._last_log_completed
+        if not force and (now - self._last_log_ts) < self._debug_log_interval_sec and completed_delta < self._debug_log_every_n:
+            return
+
+        self._last_log_ts = now
+        self._last_log_completed = self._req_completed
+
+        inflight_by_server = dict(sorted(self._req_inflight_by_server.items(), key=lambda kv: kv[0]))
+        latency_ms = list(self._latency_ms_recent)
+        if latency_ms:
+            arr = np.asarray(latency_ms, dtype=np.float32)
+            lat_p50 = float(np.percentile(arr, 50))
+            lat_p95 = float(np.percentile(arr, 95))
+            lat_mean = float(arr.mean())
+        else:
+            lat_p50 = 0.0
+            lat_p95 = 0.0
+            lat_mean = 0.0
+
+        logger.info(
+            "[rollout_debug][vllm_client] sent=%s completed=%s failed=%s inflight=%s inflight_by_server=%s "
+            "lat_ms_p50=%.1f lat_ms_p95=%.1f lat_ms_mean=%.1f",
+            self._req_sent,
+            self._req_completed,
+            self._req_failed,
+            self._req_inflight_total,
+            inflight_by_server,
+            lat_p50,
+            lat_p95,
+            lat_mean,
+        )
 
     @rollout_trace_op
     async def generate(
@@ -107,13 +170,69 @@ class AsyncLLMServerManager:
             TokenOutput: token output
         """
         server = self._choose_server(request_id)
-        output = await server.generate.remote(
-            request_id=uuid4().hex,  # use new request_id for each turn
-            prompt_ids=prompt_ids,
-            sampling_params=sampling_params,
-            image_data=image_data,
-        )
-        return output
+        server_key = self._server_key(server)
+        turn_request_id = uuid4().hex  # one request id per turn for the underlying server
+
+        t0 = time.perf_counter()
+        self._req_sent += 1
+        self._req_inflight_total += 1
+        self._req_inflight_by_server[server_key] = self._req_inflight_by_server.get(server_key, 0) + 1
+
+        if self._debug_enabled and self._debug_verbose:
+            logger.info(
+                "[rollout_debug][vllm_client] send session_id=%s request_id=%s server=%s inflight=%s "
+                "prompt_len=%s sampling_keys=%s has_image=%s",
+                request_id,
+                turn_request_id,
+                server_key,
+                self._req_inflight_total,
+                len(prompt_ids),
+                sorted(list(sampling_params.keys())),
+                image_data is not None,
+            )
+        else:
+            self._maybe_log_client_stats()
+
+        try:
+            output = await server.generate.remote(
+                request_id=turn_request_id,
+                prompt_ids=prompt_ids,
+                sampling_params=sampling_params,
+                image_data=image_data,
+            )
+            self._req_completed += 1
+            return output
+        except asyncio.CancelledError:
+            # Preserve cancellation semantics.
+            self._req_failed += 1
+            logger.warning(
+                "[rollout_debug][vllm_client] cancelled session_id=%s request_id=%s server=%s", request_id, turn_request_id, server_key
+            )
+            raise
+        except Exception as e:
+            self._req_failed += 1
+            logger.error(
+                "[rollout_debug][vllm_client] generate failed session_id=%s request_id=%s server=%s err=%s",
+                request_id,
+                turn_request_id,
+                server_key,
+                e,
+                exc_info=True,
+            )
+            # Fail-soft: return an empty output to avoid crashing the whole rollout step.
+            return TokenOutput(token_ids=[], log_probs=None, routed_experts=None, stop_reason="error")
+        finally:
+            dt_ms = (time.perf_counter() - t0) * 1000.0
+            self._latency_ms_recent.append(dt_ms)
+
+            self._req_inflight_total = max(0, self._req_inflight_total - 1)
+            cur = self._req_inflight_by_server.get(server_key, 0)
+            if cur <= 1:
+                self._req_inflight_by_server.pop(server_key, None)
+            else:
+                self._req_inflight_by_server[server_key] = cur - 1
+
+            self._maybe_log_client_stats()
 
 
 class AgentLoopMetrics(BaseModel):
@@ -338,6 +457,9 @@ class AgentLoopWorkerBase:
             responses:     |<- LLM generation ->|<- tool_calls ->|<- LLM generation ->|<- padding ->|
             response_mask: | 1, 1, 1, ..., 1, 1 | 0, 0, .., 0, 0 | 1, 1, 1, ..., 1, 1 | 0, 0, ..., 0|
         """
+        debug_enabled = os.getenv("VERL_ROLLOUT_DEBUG", "0").lower() in ("1", "true", "yes", "y", "on")
+        t_total0 = time.perf_counter()
+
         config = self.config.actor_rollout_ref.rollout
         sampling_params = dict(
             temperature=config.temperature,
@@ -390,9 +512,23 @@ class AgentLoopWorkerBase:
                     self._run_agent_loop(sampling_params, trajectory_info[i], trace=trace_this_sample, **kwargs)
                 )
             )
+        t_gather0 = time.perf_counter()
         outputs = await asyncio.gather(*tasks)
+        t_gather_s = time.perf_counter() - t_gather0
 
+        t_post0 = time.perf_counter()
         output = self._postprocess(outputs)
+        t_post_s = time.perf_counter() - t_post0
+
+        if debug_enabled:
+            logger.info(
+                "[rollout_debug][agent_loop_worker] batch=%s tasks=%s gather=%.3fs postprocess=%.3fs total=%.3fs",
+                len(batch),
+                len(tasks),
+                t_gather_s,
+                t_post_s,
+                time.perf_counter() - t_total0,
+            )
 
         return output
 
@@ -868,22 +1004,45 @@ class AgentLoopManager:
             DataProto: Output batch.
         """
 
+        debug_enabled = os.getenv("VERL_ROLLOUT_DEBUG", "0").lower() in ("1", "true", "yes", "y", "on")
+        t_wake_s = 0.0
+        t_dispatch_s = 0.0
+        t_sleep_s = 0.0
+
         # Fix for Issue #4147: Always call wake_up() to ensure weight sync
         # The wake_up()/sleep() methods internally check free_cache_engine
+        t0 = time.perf_counter()
         self.wake_up()
+        t_wake_s = time.perf_counter() - t0
         if self.reward_model_manager:
             self.reward_model_manager.wake_up()
 
         chunkes = prompts.chunk(len(self.agent_loop_workers))
+        if debug_enabled:
+            try:
+                chunk_sizes = [len(c) for c in chunkes]
+            except Exception:
+                chunk_sizes = []
+            logger.info(
+                "[rollout_debug][agent_loop_manager] prompts=%s num_workers=%s chunk_sizes=%s",
+                len(prompts),
+                len(self.agent_loop_workers),
+                chunk_sizes,
+            )
+
+        t1 = time.perf_counter()
         outputs = ray.get(
             [
                 worker.generate_sequences.remote(chunk)
                 for worker, chunk in zip(self.agent_loop_workers, chunkes, strict=True)
             ]
         )
+        t_dispatch_s = time.perf_counter() - t1
         output = DataProto.concat(outputs)
         # Fix for Issue #4147: Always call sleep() to ensure proper cleanup
+        t2 = time.perf_counter()
         self.sleep()
+        t_sleep_s = time.perf_counter() - t2
         if self.reward_model_manager:
             self.reward_model_manager.sleep()
 
@@ -892,6 +1051,18 @@ class AgentLoopManager:
         timing = self._performance_metrics(metrics, output)
 
         output.meta_info = {"timing": timing, **outputs[0].meta_info}
+
+        if debug_enabled:
+            logger.info(
+                "[rollout_debug][agent_loop_manager] timing wake=%.3fs dispatch=%.3fs sleep=%.3fs "
+                "(slowest_sample generate=%.3fs tool=%.3fs resp_len=%s)",
+                t_wake_s,
+                t_dispatch_s,
+                t_sleep_s,
+                timing.get("agent_loop/slowest/generate_sequences", -1.0),
+                timing.get("agent_loop/slowest/tool_calls", -1.0),
+                timing.get("agent_loop/slowest/response_length", -1),
+            )
         
         # Clear outputs list after concatenation
         del outputs

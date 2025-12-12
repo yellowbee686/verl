@@ -16,7 +16,9 @@ import asyncio
 import json
 import logging
 import os
+import time
 from concurrent.futures import Future
+from collections import deque
 from pprint import pprint
 from typing import Any, Callable, Optional
 
@@ -200,6 +202,21 @@ class vLLMHttpServerBase:
         self.gpus_per_node = gpus_per_node
         self.nnodes = nnodes
 
+        # Debug counters for rollout request pressure / batching.
+        self._rollout_debug_enabled = os.getenv("VERL_ROLLOUT_DEBUG", "0").lower() in ("1", "true", "yes", "y", "on")
+        self._rollout_debug_verbose = os.getenv("VERL_ROLLOUT_DEBUG_VERBOSE", "0").lower() in ("1", "true", "yes", "y", "on")
+        self._rollout_debug_log_interval_sec = float(os.getenv("VERL_ROLLOUT_DEBUG_LOG_INTERVAL_SEC", "10"))
+        self._rollout_debug_log_every_n = int(os.getenv("VERL_ROLLOUT_DEBUG_LOG_EVERY_N", "200"))
+        self._rollout_debug_latency_buf_size = int(os.getenv("VERL_ROLLOUT_DEBUG_LAT_BUF", "512"))
+
+        self._req_total: int = 0
+        self._req_completed: int = 0
+        self._req_failed: int = 0
+        self._req_inflight: int = 0
+        self._latency_ms_recent: deque[float] = deque(maxlen=max(1, self._rollout_debug_latency_buf_size))
+        self._last_log_ts: float = 0.0
+        self._last_log_completed: int = 0
+
         if self.rollout_mode != RolloutMode.HYBRID and self.config.load_format == "dummy":
             logger.warning(f"rollout mode is {self.rollout_mode}, load_format is dummy, set to auto")
             self.config.load_format = "auto"
@@ -229,6 +246,47 @@ class vLLMHttpServerBase:
         """Get http server address and port."""
         assert self._server_port is not None, "http server is not launched, port is None"
         return self._server_address, self._server_port
+
+    def _maybe_log_request_stats(self, *, force: bool = False) -> None:
+        if not self._rollout_debug_enabled:
+            return
+
+        now = time.perf_counter()
+        completed_delta = self._req_completed - self._last_log_completed
+        if (
+            not force
+            and (now - self._last_log_ts) < self._rollout_debug_log_interval_sec
+            and completed_delta < self._rollout_debug_log_every_n
+        ):
+            return
+
+        self._last_log_ts = now
+        self._last_log_completed = self._req_completed
+
+        latency_ms = list(self._latency_ms_recent)
+        if latency_ms:
+            arr = np.asarray(latency_ms, dtype=np.float32)
+            lat_p50 = float(np.percentile(arr, 50))
+            lat_p95 = float(np.percentile(arr, 95))
+            lat_mean = float(arr.mean())
+        else:
+            lat_p50 = 0.0
+            lat_p95 = 0.0
+            lat_mean = 0.0
+
+        logger.info(
+            "[rollout_debug][vllm_server] replica_rank=%s node_rank=%s received=%s completed=%s failed=%s inflight=%s "
+            "lat_ms_p50=%.1f lat_ms_p95=%.1f lat_ms_mean=%.1f",
+            self.replica_rank,
+            self.node_rank,
+            self._req_total,
+            self._req_completed,
+            self._req_failed,
+            self._req_inflight,
+            lat_p50,
+            lat_p95,
+            lat_mean,
+        )
 
     async def launch_server(self, master_address: str = None, master_port: int = None):
         if self.node_rank != 0:
@@ -291,6 +349,17 @@ class vLLMHttpServerBase:
             "hf_overrides": {"quantization_config": fp8_block_quant_kwargs} if quantization == "fp8" else None,
             **engine_kwargs,
         }
+
+        if self._rollout_debug_enabled:
+            # When max_num_batched_tokens <= max_model_len, chunked prefill usually cannot batch
+            # multiple long prompts, which often leads to low GPU utilization.
+            if self.config.max_num_batched_tokens <= self.config.max_model_len:
+                logger.warning(
+                    "[rollout_debug][vllm_server] max_num_batched_tokens (%s) <= max_model_len (%s). "
+                    "This can limit prefill batching for long prompts and reduce throughput.",
+                    self.config.max_num_batched_tokens,
+                    self.config.max_model_len,
+                )
 
         if self.config.prometheus.enable:
             if self.config.prometheus.served_model_name:
@@ -440,57 +509,101 @@ class vLLMHttpServerBase:
         image_data: Optional[list[Any]] = None,
     ) -> TokenOutput:
         """Generate sequence with token-in-token-out."""
+        debug_enabled = self._rollout_debug_enabled
+        t0 = time.perf_counter()
+        if debug_enabled:
+            self._req_total += 1
+            self._req_inflight += 1
+            if self._rollout_debug_verbose:
+                logger.info(
+                    "[rollout_debug][vllm_server] recv request_id=%s prompt_len=%s inflight=%s",
+                    request_id,
+                    len(prompt_ids),
+                    self._req_inflight,
+                )
+            else:
+                self._maybe_log_request_stats()
+
         # TODO(@wuxibin): switch to `/generate` http endpoint once multi-modal support ready.
         max_tokens = self.config.max_model_len - len(prompt_ids)
         sampling_params["logprobs"] = 0 if sampling_params.pop("logprobs", False) else None
         sampling_params.setdefault("repetition_penalty", self.config.get("repetition_penalty", 1.0))
-        sampling_params = SamplingParams(max_tokens=max_tokens, **sampling_params)
-        prompt_ids = _qwen2_5_vl_dedup_image_tokens(prompt_ids, self.model_config.processor)
-        prompt = TokensPrompt(
-            prompt_token_ids=prompt_ids, multi_modal_data={"image": image_data} if image_data else None
-        )
+        try:
+            sampling_params = SamplingParams(max_tokens=max_tokens, **sampling_params)
+            prompt_ids = _qwen2_5_vl_dedup_image_tokens(prompt_ids, self.model_config.processor)
+            prompt = TokensPrompt(
+                prompt_token_ids=prompt_ids, multi_modal_data={"image": image_data} if image_data else None
+            )
 
-        # Add lora request
-        lora_request = None
-        if self.model_config.lora_rank > 0:
-            # Make sure we also check that the lora is already loaded in the engine
-            lora_loaded = VLLM_LORA_INT_ID in await self.engine.list_loras()
-            if lora_loaded:
-                lora_request = LoRARequest(
-                    lora_name=VLLM_LORA_NAME, lora_int_id=VLLM_LORA_INT_ID, lora_path=VLLM_LORA_PATH
+            # Add lora request
+            lora_request = None
+            if self.model_config.lora_rank > 0:
+                # Make sure we also check that the lora is already loaded in the engine
+                lora_loaded = VLLM_LORA_INT_ID in await self.engine.list_loras()
+                if lora_loaded:
+                    lora_request = LoRARequest(
+                        lora_name=VLLM_LORA_NAME, lora_int_id=VLLM_LORA_INT_ID, lora_path=VLLM_LORA_PATH
+                    )
+
+            generator = self.engine.generate(
+                prompt=prompt, sampling_params=sampling_params, request_id=request_id, lora_request=lora_request
+            )
+
+            # Get final response
+            final_res: Optional[RequestOutput] = None
+            async for output in generator:
+                final_res = output
+
+            if final_res is None:
+                logger.error(
+                    "[rollout_debug][vllm_server] no final output request_id=%s prompt_len=%s",
+                    request_id,
+                    len(prompt_ids),
                 )
+                if debug_enabled:
+                    self._req_failed += 1
+                return TokenOutput(token_ids=[], log_probs=None, routed_experts=None, stop_reason="error")
 
-        generator = self.engine.generate(
-            prompt=prompt, sampling_params=sampling_params, request_id=request_id, lora_request=lora_request
-        )
+            token_ids = final_res.outputs[0].token_ids
+            log_probs = None
+            if sampling_params.logprobs is not None:
+                log_probs = [
+                    logprobs[token_ids[i]].logprob for i, logprobs in enumerate(final_res.outputs[0].logprobs)
+                ]
 
-        # Get final response
-        final_res: Optional[RequestOutput] = None
-        async for output in generator:
-            final_res = output
-        assert final_res is not None
+            routed_experts = None
+            if self.config.enable_rollout_routing_replay:
+                routed_experts = final_res.outputs[0].routed_experts
 
-        token_ids = final_res.outputs[0].token_ids
-        log_probs = None
-        if sampling_params.logprobs is not None:
-            log_probs = [logprobs[token_ids[i]].logprob for i, logprobs in enumerate(final_res.outputs[0].logprobs)]
+            # Determine stop reason from finish_reason
+            finish_reason = final_res.outputs[0].finish_reason
+            if finish_reason == "abort":
+                stop_reason = "aborted"
+            elif finish_reason in ("stop", "length"):
+                stop_reason = "completed"
+            else:
+                stop_reason = finish_reason  # for more stop reason in the future
 
-        routed_experts = None
-        if self.config.enable_rollout_routing_replay:
-            routed_experts = final_res.outputs[0].routed_experts
-
-        # Determine stop reason from finish_reason
-        finish_reason = final_res.outputs[0].finish_reason
-        if finish_reason == "abort":
-            stop_reason = "aborted"
-        elif finish_reason in ("stop", "length"):
-            stop_reason = "completed"
-        else:
-            stop_reason = finish_reason  # for more stop reason in the future
-
-        return TokenOutput(
-            token_ids=token_ids, log_probs=log_probs, routed_experts=routed_experts, stop_reason=stop_reason
-        )
+            if debug_enabled:
+                self._req_completed += 1
+            return TokenOutput(
+                token_ids=token_ids, log_probs=log_probs, routed_experts=routed_experts, stop_reason=stop_reason
+            )
+        except asyncio.CancelledError:
+            if debug_enabled:
+                self._req_failed += 1
+            logger.warning("[rollout_debug][vllm_server] cancelled request_id=%s", request_id)
+            raise
+        except Exception as e:
+            if debug_enabled:
+                self._req_failed += 1
+            logger.error("[rollout_debug][vllm_server] generate failed request_id=%s err=%s", request_id, e, exc_info=True)
+            return TokenOutput(token_ids=[], log_probs=None, routed_experts=None, stop_reason="error")
+        finally:
+            if debug_enabled:
+                self._latency_ms_recent.append((time.perf_counter() - t0) * 1000.0)
+                self._req_inflight = max(0, self._req_inflight - 1)
+                self._maybe_log_request_stats()
 
     async def wake_up(self):
         if self.rollout_mode == RolloutMode.HYBRID:

@@ -14,6 +14,7 @@
 import copy
 import logging
 import os
+import time
 from typing import Any
 from uuid import uuid4
 
@@ -35,11 +36,19 @@ class SingleTurnAgentLoop(AgentLoopBase):
         self.apply_chat_template_kwargs = self.config.data.get("apply_chat_template_kwargs", {})
 
     async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput:
+        debug_enabled = os.getenv("VERL_ROLLOUT_DEBUG", "0").lower() in ("1", "true", "yes", "y", "on")
+        debug_verbose = os.getenv("VERL_ROLLOUT_DEBUG_VERBOSE", "0").lower() in ("1", "true", "yes", "y", "on")
+
+        t_start = time.perf_counter()
         messages = list(kwargs["raw_prompt"])
         image_data = copy.deepcopy((kwargs.get("multi_modal_data") or {}).get("image", None))
+        t_after_copy = time.perf_counter()
 
         metrics = {}
         request_id = uuid4().hex
+
+        t_template_done = t_after_copy
+        t_processor_done = t_after_copy
 
         # Use processor if available for multimodal support
         if self.processor is not None:
@@ -52,8 +61,10 @@ class SingleTurnAgentLoop(AgentLoopBase):
                     **self.apply_chat_template_kwargs,
                 ),
             )
+            t_template_done = time.perf_counter()
             model_inputs = self.processor(text=[raw_prompt], images=image_data, return_tensors="pt")
             prompt_ids = model_inputs.pop("input_ids").squeeze(0).tolist()
+            t_processor_done = time.perf_counter()
         else:
             prompt_ids = await self.loop.run_in_executor(
                 None,
@@ -61,11 +72,57 @@ class SingleTurnAgentLoop(AgentLoopBase):
                     messages, add_generation_prompt=True, tokenize=True, **self.apply_chat_template_kwargs
                 ),
             )
+            t_template_done = time.perf_counter()
+            t_processor_done = t_template_done
 
+        t_before_vllm = time.perf_counter()
         with simple_timer("generate_sequences", metrics):
             output = await self.server_manager.generate(
                 request_id=request_id, prompt_ids=prompt_ids, sampling_params=sampling_params, image_data=image_data
             )
+        t_after_vllm = time.perf_counter()
+
+        if debug_enabled:
+            if image_data is None:
+                num_images = 0
+            elif isinstance(image_data, list):
+                num_images = len(image_data)
+            else:
+                num_images = 1
+
+            t_copy_ms = (t_after_copy - t_start) * 1000.0
+            t_template_ms = (t_template_done - t_after_copy) * 1000.0
+            t_processor_ms = (t_processor_done - t_template_done) * 1000.0
+            t_vllm_ms = (t_after_vllm - t_before_vllm) * 1000.0
+            t_total_ms = (t_after_vllm - t_start) * 1000.0
+
+            if debug_verbose:
+                logger.info(
+                    "[rollout_debug][single_turn] request_id=%s prompt_tokens=%s images=%s "
+                    "t_copy_ms=%.1f t_template_ms=%.1f t_processor_ms=%.1f t_vllm_ms=%.1f t_total_ms=%.1f "
+                    "sampling=%s",
+                    request_id,
+                    len(prompt_ids),
+                    num_images,
+                    t_copy_ms,
+                    t_template_ms,
+                    t_processor_ms,
+                    t_vllm_ms,
+                    t_total_ms,
+                    {k: sampling_params.get(k) for k in ("temperature", "top_p", "top_k", "logprobs")},
+                )
+            else:
+                logger.info(
+                    "[rollout_debug][single_turn] request_id=%s prompt_tokens=%s images=%s "
+                    "t_prepare_ms=%.1f t_vllm_ms=%.1f t_total_ms=%.1f",
+                    request_id,
+                    len(prompt_ids),
+                    num_images,
+                    (t_before_vllm - t_start) * 1000.0,
+                    t_vllm_ms,
+                    t_total_ms,
+                )
+
         response_mask = [1] * len(output.token_ids)
 
         output = AgentLoopOutput(
