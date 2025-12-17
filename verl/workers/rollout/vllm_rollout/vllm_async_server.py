@@ -13,6 +13,7 @@
 # limitations under the License.
 import argparse
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -454,12 +455,14 @@ class vLLMHttpServerBase:
         vllm_config = engine_args.create_engine_config(usage_context=usage_context)
         vllm_config.parallel_config.data_parallel_master_port = self._dp_master_port
 
-        engine_client = AsyncLLM.from_vllm_config(
-            vllm_config=vllm_config,
-            usage_context=usage_context,
-            enable_log_requests=engine_args.enable_log_requests,
-            disable_log_stats=engine_args.disable_log_stats,
-        )
+        fn_args = set(dict(inspect.signature(AsyncLLM.from_vllm_config).parameters).keys())
+        kwargs = {}
+        if "enable_log_requests" in fn_args:
+            kwargs["enable_log_requests"] = engine_args.enable_log_requests
+        if "disable_log_stats" in fn_args:
+            kwargs["disable_log_stats"] = engine_args.disable_log_stats
+
+        engine_client = AsyncLLM.from_vllm_config(vllm_config=vllm_config, usage_context=usage_context, **kwargs)
 
         # Don't keep the dummy data in memory
         await engine_client.reset_mm_cache()
@@ -635,7 +638,7 @@ class vLLMHttpServerBase:
     async def wait_for_requests_to_drain(self):
         await self.engine.wait_for_requests_to_drain()
 
-    async def abort_all_requests(self) -> dict[str, Any]:
+    async def abort_all_requests(self, reset_prefix_cache: bool = True) -> dict[str, Any]:
         """Abort all ongoing generation requests.
 
         Returns:
@@ -665,6 +668,11 @@ class vLLMHttpServerBase:
             self.engine.output_processor.abort_requests(request_ids)
             await self.engine.engine_core.abort_requests_async(request_ids)
 
+            # Try to reset prefix cache to ensure clean state
+            if reset_prefix_cache:
+                await self.clear_kv_cache()
+                logger.info("Prefix cache reset after abort")
+
             logger.info(f"Aborted {len(request_ids)} requests: {request_ids}")
             return {"aborted_count": len(request_ids), "request_ids": request_ids}
 
@@ -672,7 +680,7 @@ class vLLMHttpServerBase:
             logger.error(f"Error aborting requests: {e}")
             return {"aborted_count": 0, "request_ids": [], "error": str(e)}
 
-    async def abort_request(self, request_id: str) -> dict[str, Any]:
+    async def abort_request(self, request_id: str, reset_prefix_cache: bool = True) -> dict[str, Any]:
         """Abort a specific generation request.
 
         Args:
@@ -699,6 +707,11 @@ class vLLMHttpServerBase:
             # Abort in output processor and engine core
             self.engine.output_processor.abort_requests([request_id])
             await self.engine.engine_core.abort_requests_async([request_id])
+
+            # Try to reset prefix cache to ensure clean state
+            if reset_prefix_cache:
+                await self.clear_kv_cache()
+                logger.info(f"Prefix cache reset after abort request {request_id}")
 
             logger.info(f"Aborted request: {request_id}")
             return {"aborted": True, "request_id": request_id}

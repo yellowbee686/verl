@@ -60,7 +60,7 @@ from verl.utils.fsdp_utils import (
     offload_fsdp_optimizer,
     replace_lora_wrapper,
 )
-from verl.utils.model import convert_weight_keys, extract_multi_modal_inputs_tensordict
+from verl.utils.model import convert_weight_keys, extract_multi_modal_inputs
 from verl.utils.py_functional import convert_to_regular_types
 from verl.utils.torch_functional import logprobs_from_logits
 from verl.utils.ulysses import gather_outputs_and_unpad, ulysses_pad, ulysses_pad_and_slice_inputs
@@ -726,7 +726,7 @@ class FSDPEngineWithLMHead(FSDPEngine):
 
         assert pad_mode == DatasetPadMode.NO_PADDING, f"pad_mode {pad_mode} not supported"
 
-        multi_modal_inputs = extract_multi_modal_inputs_tensordict(micro_batch)
+        multi_modal_inputs = extract_multi_modal_inputs(micro_batch.get("multi_modal_inputs", []))
         input_ids = micro_batch["input_ids"]
         position_ids = micro_batch["position_ids"]
 
@@ -982,10 +982,8 @@ class FSDPEngineWithValueHead(FSDPEngineWithLMHead):
         use_remove_padding = tu.get_non_tensor_data(data=micro_batch, key="use_remove_padding", default=True)
         pad_mode = tu.get_non_tensor_data(data=micro_batch, key="pad_mode", default=DatasetPadMode.NO_PADDING)
 
+        input_ids = micro_batch["input_ids"]
         if use_remove_padding:
-            input_ids = micro_batch["input_ids"]
-            batch_size, seqlen = input_ids.shape
-
             if hasattr(self.module, "v_head"):
                 # For trl.AutoModelForCausalLMWithValueHead
                 values_rmpad = output[2].squeeze(0).unsqueeze(-1)
