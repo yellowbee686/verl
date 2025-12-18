@@ -1657,18 +1657,6 @@ class RayPPOTrainer:
                                 gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch_output)
                             else:
                                 gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
-                            batch = batch.union(gen_baseline_output)
-                            # compute reward model score on batch
-                            rm_scores = None
-                            if self.use_rm and "rm_scores" not in batch.batch.keys():
-                                if not self.use_reward_loop:
-                                    rm_scores = self.rm_wg.compute_rm_score(batch)
-                                else:
-                                    assert self.reward_loop_manager is not None, "RewardLoopManager is None"
-                                    rm_scores = self.reward_loop_manager.compute_rm_score(batch)
-                                batch = batch.union(rm_scores)
-                            reward_baseline_tensor, _ = compute_reward(batch, self.reward_fn)
-                            reward_baseline_tensor = reward_baseline_tensor.sum(dim=-1)
 
                             timing_raw.update(gen_batch_output.meta_info["timing"])
                             gen_batch_output.meta_info.pop("timing", None)
