@@ -148,7 +148,7 @@ class ActorConfig(BaseConfig):
     use_torch_compile: bool = True
     kl_loss_coef: float = 0.001
     kl_loss_type: str = "low_var_kl"
-    router_aux_loss_coef: float = 0.01
+    router_aux_loss_coef: float = 0.0
     ppo_epochs: int = 1
     shuffle: bool = False
     data_loader_seed: int = 1

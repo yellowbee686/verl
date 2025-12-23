@@ -578,8 +578,11 @@ class DataParallelPPOActor(BasePPOActor):
                         loss = policy_loss * loss_scale_factor
                     else:
                         loss = policy_loss * loss_scale_factor
-                    # loss.backward()
-                    
+                    if self.scaler is not None:
+                        self.scaler.scale(loss).backward()
+                    else:
+                        loss.backward()
+
                     # if is_archer:
                     #     micro_batch_metrics.update(
                     #         {
@@ -599,10 +602,6 @@ class DataParallelPPOActor(BasePPOActor):
                     #             "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
                     #         }
                     #     )
-                    if self.scaler is not None:
-                        self.scaler.scale(loss).backward()
-                    else:
-                        loss.backward()
 
                     micro_batch_metrics["actor/pg_loss"] = pg_loss.detach().item() * loss_scale_factor
                     append_to_dict(metrics, micro_batch_metrics)
