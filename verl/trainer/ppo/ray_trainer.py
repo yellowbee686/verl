@@ -489,7 +489,7 @@ class RayPPOTrainer:
                 entry[k] = value
             lines.append(json.dumps(entry, ensure_ascii=False))
 
-        with open(filename, "w") as f:
+        with open(filename, "w", encoding='utf-8') as f:
             f.write("\n".join(lines) + "\n")
 
         print(f"Dumped generations to {filename}")
