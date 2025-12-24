@@ -1217,7 +1217,10 @@ def compute_policy_loss_gspo(
     # s_i,t(θ) = sg[s_i(θ)] · π_θ(y_i,t|x, y_i,<t) / sg[π_θ(y_i,t|x, y_i,<t)]
     # In log space: log(s_i,t(θ)) = sg[log(s_i(θ))] + log_prob - sg[log_prob]
     log_seq_importance_ratio = log_prob - log_prob.detach() + negative_approx_kl_seq.detach().unsqueeze(-1)
-    log_seq_importance_ratio = torch.clamp(log_seq_importance_ratio, min=-10.0, max=10.0)  # clamp for numerical stability
+    # Clamp only the upper bound for numerical stability: exp(x) can overflow for large x, but
+    # very negative x only underflows towards 0 and should not be artificially lifted (it would
+    # bias the importance weights for highly off-policy samples).
+    log_seq_importance_ratio = torch.clamp(log_seq_importance_ratio, max=10.0)
 
     # finaly exp() to remove log
     seq_importance_ratio = torch.exp(log_seq_importance_ratio)
