@@ -68,6 +68,12 @@ policy_loss:
   # KL divergence penalty coefficient
   ppo_kl_coef: 0.1
 
+  # SAPO temperature for positive advantages
+  tau_pos: 1.0
+
+  # SAPO temperature for negative advantages
+  tau_neg: 1.05
+
 # Constant C in Dual-clip PPO; clips when advantage < 0 and ratio > C
 clip_ratio_c: 3.0
 

@@ -1168,6 +1168,7 @@ def compute_policy_loss_archer(
 
     return pg_loss, pg_clipfrac_upper, pg_clipfrac_lower, negative_pg_clipfrac_dual, positive_pg_clipfrac_dual
 
+
 @register_policy_loss("gspo")
 def compute_policy_loss_gspo(
     old_log_prob: torch.Tensor,
@@ -1248,6 +1249,54 @@ def compute_policy_loss_gspo(
         "actor/pg_clipfrac": pg_clipfrac.detach().item(),
         "actor/ppo_kl": ppo_kl.detach().item(),
         "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
+    }
+    return pg_loss, pg_metrics
+
+
+@register_policy_loss("sapo")
+def compute_policy_loss_sapo(
+    old_log_prob: torch.Tensor,
+    log_prob: torch.Tensor,
+    advantages: torch.Tensor,
+    response_mask: torch.Tensor,
+    loss_agg_mode: str = "seq-mean-token-mean",
+    config: Optional[ActorConfig] = None,
+    rollout_is_weights: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """Compute the SAPO policy objective with soft gating.
+    SAPO applies a temperature-controlled sigmoid gate with 4/tau scaling
+    and aggregates at the sequence level.
+    """
+
+    assert config is not None
+    assert isinstance(config, ActorConfig)
+    tau_pos = torch.as_tensor(config.policy_loss.tau_pos, dtype=advantages.dtype, device=advantages.device)
+    tau_neg = torch.as_tensor(config.policy_loss.tau_neg, dtype=advantages.dtype, device=advantages.device)
+
+    negative_approx_kl = log_prob - old_log_prob
+    negative_approx_kl = torch.clamp(negative_approx_kl, min=-20.0, max=20.0)
+    ratio = torch.exp(negative_approx_kl)
+
+    taus = torch.where(advantages > 0, tau_pos, tau_neg)
+    soft_gate = torch.sigmoid(taus * (ratio - 1.0)) * (4.0 / taus)
+
+    pg_losses = -soft_gate * advantages
+
+    if rollout_is_weights is not None:
+        pg_losses = pg_losses * rollout_is_weights
+
+    pg_loss = agg_loss(
+        loss_mat=pg_losses,
+        loss_mask=response_mask,
+        loss_agg_mode="seq-mean-token-mean",
+        **config.global_batch_info,
+    )
+
+    ppo_kl = verl_F.masked_mean(-negative_approx_kl, response_mask)
+    pg_metrics = {
+        "actor/pg_clipfrac": 0.0,
+        "actor/ppo_kl": ppo_kl.detach().item(),
+        "actor/pg_clipfrac_lower": 0.0,
     }
     return pg_loss, pg_metrics
 
