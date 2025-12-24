@@ -60,6 +60,8 @@ class DataParallelPPOActor(BasePPOActor):
         super().__init__(config)
         self.actor_module = actor_module
         self.actor_optimizer = actor_optimizer
+        # Debug flag to avoid flooding logs; used for one-time aux_loss print.
+        self._printed_aux_loss_debug: bool = False
         role = "Ref" if actor_optimizer is None else "Actor"
 
         self.use_remove_padding = self.config.get("use_remove_padding", False)
@@ -564,12 +566,17 @@ class DataParallelPPOActor(BasePPOActor):
 
                     # integrate auxiliary MoE load-balancing loss
                     # in model forward without label, aux_loss doesn't multiply router_aux_loss_coef
+                    if (not self._printed_aux_loss_debug) and torch.distributed.get_rank() == 0:
+                        aux_loss_val = None if aux_loss is None else aux_loss.detach().float().mean().item()
+                        print(
+                            "DEBUG actor aux_loss(one-shot): "
+                            f"aux_loss={aux_loss_val} "
+                            f"router_aux_loss_coef={self.config.router_aux_loss_coef} "
+                            f"loss_scale_factor={loss_scale_factor}"
+                        )
+                        self._printed_aux_loss_debug = True
                     if aux_loss is not None and self.config.router_aux_loss_coef > 0:
                         aux_loss = aux_loss.to(device=policy_loss.device, dtype=policy_loss.dtype)
-                        # if not torch.is_tensor(aux_loss):
-                        #     aux_loss = torch.as_tensor(aux_loss, device=policy_loss.device, dtype=policy_loss.dtype)
-                        # else:
-                        #     aux_loss = aux_loss.to(device=policy_loss.device, dtype=policy_loss.dtype)
                         policy_loss = policy_loss + aux_loss * self.config.router_aux_loss_coef
                         micro_batch_metrics["actor/aux_loss"] = aux_loss.detach().item() * loss_scale_factor
 
