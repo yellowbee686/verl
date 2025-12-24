@@ -41,6 +41,14 @@ def parse_args():
     )
     base_op_parser.add_argument("--local_dir", type=str, default=None, help="Path to the saved model checkpoints.")
     base_op_parser.add_argument(
+        "--dtype",
+        type=str,
+        default="bfloat16",
+        choices=["bfloat16", "float16", "float32", "auto"],
+        help="Target dtype for merged HF model weights and config.torch_dtype. "
+        "Use 'auto' to follow the dtype recorded in checkpoint config.",
+    )
+    base_op_parser.add_argument(
         "--tie-word-embedding",
         action="store_true",
         help="Whether to tie word embedding weights (currently only Megatron supported)",
@@ -113,6 +121,7 @@ class ModelMergerConfig:
     is_value_model: bool = False
     local_dir: Optional[str] = None
     hf_model_config_path: Optional[str] = None
+    dtype: str = "bfloat16"
     hf_upload: bool = field(init=False)
     use_cpu_initialization: bool = False
 
@@ -133,6 +142,7 @@ def generate_config_from_args(args: argparse.Namespace) -> ModelMergerConfig:
         "is_value_model": args.is_value_model,
         "local_dir": args.local_dir,
         "hf_model_config_path": os.path.join(args.local_dir, "huggingface"),
+        "dtype": args.dtype,
         "use_cpu_initialization": args.use_cpu_initialization,
     }
 
@@ -187,6 +197,43 @@ class BaseModelMerger(ABC):
         self.model_config = AutoConfig.from_pretrained(
             self.hf_model_config_path, trust_remote_code=self.config.trust_remote_code
         )
+
+    @staticmethod
+    def _torch_dtype_to_hf_config_str(dtype: torch.dtype) -> str | None:
+        mapping: dict[torch.dtype, str] = {
+            torch.bfloat16: "bfloat16",
+            torch.float16: "float16",
+            torch.float32: "float32",
+        }
+        return mapping.get(dtype)
+
+    def get_target_torch_dtype(self) -> tuple[torch.dtype, str]:
+        """
+        Returns:
+            (torch_dtype, hf_config_dtype_str)
+        """
+        dtype_str = (getattr(self.config, "dtype", None) or "bfloat16").lower()
+        if dtype_str == "auto":
+            cfg_dtype = getattr(self.model_config, "torch_dtype", None)
+            if isinstance(cfg_dtype, str) and cfg_dtype:
+                dtype_str = cfg_dtype.lower()
+            elif isinstance(cfg_dtype, torch.dtype):
+                dtype_str = self._torch_dtype_to_hf_config_str(cfg_dtype) or "bfloat16"
+            else:
+                dtype_str = "bfloat16"
+
+        dtype_map: dict[str, torch.dtype] = {
+            "bfloat16": torch.bfloat16,
+            "float16": torch.float16,
+            "float32": torch.float32,
+        }
+        target_torch_dtype = dtype_map.get(dtype_str)
+        if target_torch_dtype is None:
+            print(f"Warning: Unknown dtype '{dtype_str}', fallback to bfloat16")
+            target_torch_dtype = torch.bfloat16
+            dtype_str = "bfloat16"
+
+        return target_torch_dtype, dtype_str
 
     def get_transformers_auto_model_class(self):
         has_remote_code = hasattr(self.model_config, "auto_map") and any(
@@ -291,9 +338,12 @@ class BaseModelMerger(ABC):
 
     def save_hf_model_and_tokenizer(self, state_dict: dict[str, torch.Tensor]):
         auto_model_class = self.get_transformers_auto_model_class()
+        target_torch_dtype, target_dtype_str = self.get_target_torch_dtype()
+        # Keep config aligned so downstream torch_dtype="auto" won't silently upcast to fp32.
+        self.model_config.torch_dtype = target_dtype_str
         with init_empty_weights():
             model = auto_model_class.from_config(
-                self.model_config, torch_dtype=torch.bfloat16, trust_remote_code=self.config.trust_remote_code
+                self.model_config, torch_dtype=target_torch_dtype, trust_remote_code=self.config.trust_remote_code
             )
         model.to_empty(device="cpu")
         model = self.patch_model_generation_config(model)
