@@ -230,6 +230,9 @@ def _get_input_embeds(
 class Qwen3VLCausalLMOutputForPPO(Qwen3VLCausalLMOutputWithPast):
     log_probs: Optional[torch.FloatTensor] = None
     entropy: Optional[torch.FloatTensor] = None
+    # MoE auxiliary load-balancing loss (if the underlying model returns it).
+    # This is consumed by verl FSDP actor to regularize expert routing.
+    aux_loss: Optional[torch.FloatTensor] = None
 
 
 def qwen3_vl_base_forward(
@@ -266,6 +269,7 @@ def forward_with_normal_backend(
     return Qwen3VLCausalLMOutputForPPO(
         logits=logits,
         hidden_states=outputs.hidden_states,
+        aux_loss=getattr(outputs, "aux_loss", None),
     )
 
 
@@ -300,6 +304,7 @@ def forward_with_torch_backend(
         log_probs=log_probs,
         entropy=entropy,
         hidden_states=outputs.hidden_states,
+        aux_loss=getattr(outputs, "aux_loss", None),
     )
 
 
@@ -334,6 +339,7 @@ def forward_with_triton_backend(
         log_probs=log_probs,
         entropy=entropy,
         hidden_states=outputs.hidden_states,
+        aux_loss=getattr(outputs, "aux_loss", None),
     )
 
 

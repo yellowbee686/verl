@@ -174,13 +174,6 @@ class DataParallelSPPOActor(DataParallelPPOActor):
                         metrics["actor/kl_loss"] = kl_loss.detach().item()
                         metrics["actor/kl_coef"] = self.config.kl_loss_coef
 
-                    # integrate auxiliary MoE load-balancing loss after KL
-                    if aux_loss is not None:
-                        if not torch.is_tensor(aux_loss):
-                            aux_loss = torch.as_tensor(aux_loss, device=policy_loss.device, dtype=policy_loss.dtype)
-                        policy_loss = policy_loss + aux_loss
-                        metrics["actor/aux_loss"] = aux_loss.detach().item()
-
                     if self.config.use_dynamic_bsz:
                         # relative to the dynamic bsz
                         loss = policy_loss * (len(data) / self.config.ppo_mini_batch_size)

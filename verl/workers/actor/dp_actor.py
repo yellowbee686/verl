@@ -198,6 +198,10 @@ class DataParallelPPOActor(BasePPOActor):
                     extra_args["temperature"] = temperature
                     extra_args["return_dict"] = True
 
+                # Only request router logits (and thus aux_loss) when we will actually consume it.
+                # Skip for reference policy worker to avoid extra overhead.
+                if self.actor_optimizer is not None and self.config.router_aux_loss_coef > 0:
+                    extra_args["output_router_logits"] = True
                 output = self.actor_module(
                     input_ids=input_ids_rmpad,
                     attention_mask=None,
@@ -283,6 +287,10 @@ class DataParallelPPOActor(BasePPOActor):
                     extra_args["temperature"] = temperature
                     extra_args["return_dict"] = True
 
+                # Only request router logits (and thus aux_loss) when we will actually consume it.
+                # Skip for reference policy worker to avoid extra overhead.
+                if self.actor_optimizer is not None and self.config.router_aux_loss_coef > 0:
+                    extra_args["output_router_logits"] = True
                 output = self.actor_module(
                     input_ids=input_ids,
                     attention_mask=attention_mask,

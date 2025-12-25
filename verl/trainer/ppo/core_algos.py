@@ -465,16 +465,11 @@ def compute_reinforce_plus_plus_baseline_outcome_advantage(
                 id2mean[idx] = torch.mean(torch.stack(id2score[idx]))
             else:
                 raise ValueError(f"no score in prompt index: {idx}")
-        # 1) group-center per sample
         for i in range(bsz):
             scores[i] = scores[i] - id2mean[index[i]]
 
-        # 2) sample-equal z-score at outcome level (before broadcasting)
-        sigma_eq = scores.std(unbiased=False)
-        scores = scores / (sigma_eq + epsilon)
-
-        # 3) broadcast to tokens without additional token-level whitening
-        scores = scores.unsqueeze(-1) * response_mask
+        scores = scores.unsqueeze(-1).tile([1, response_length]) * response_mask
+        scores = verl_F.masked_whiten(scores, response_mask) * response_mask
 
     return scores, scores
 

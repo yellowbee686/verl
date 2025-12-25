@@ -707,8 +707,8 @@ class RayPPOTrainer:
             metric_dict["val-aux/num_turns/max"] = sample_turns.max()
             metric_dict["val-aux/num_turns/mean"] = sample_turns.mean()
 
-        del test_batch, test_gen_batch, test_output_gen_batch, reward_tensor
-        gc.collect()
+        # del test_batch, test_gen_batch, test_output_gen_batch, reward_tensor
+        # gc.collect()
         return metric_dict
 
     def init_workers(self):
