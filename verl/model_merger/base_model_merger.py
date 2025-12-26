@@ -207,6 +207,34 @@ class BaseModelMerger(ABC):
         }
         return mapping.get(dtype)
 
+    @staticmethod
+    def _maybe_set_config_dtype(cfg, target_dtype_str: str) -> None:
+        """
+        Best-effort: align common dtype fields in config-like objects.
+
+        Notes:
+        - Some models (e.g. Qwen-VL family) may carry nested configs like `text_config` / `vision_config`
+          with their own `dtype` fields in config.json.
+        - We avoid raising here; exporting should be resilient.
+        """
+        if cfg is None:
+            return
+
+        if isinstance(cfg, dict):
+            if "dtype" in cfg:
+                cfg["dtype"] = target_dtype_str
+            if "torch_dtype" in cfg:
+                cfg["torch_dtype"] = target_dtype_str
+            return
+
+        for attr_name in ("dtype", "torch_dtype"):
+            if hasattr(cfg, attr_name):
+                try:
+                    setattr(cfg, attr_name, target_dtype_str)
+                except Exception:
+                    # fail-soft, do not block exporting
+                    pass
+
     def get_target_torch_dtype(self) -> tuple[torch.dtype, str]:
         """
         Returns:
@@ -341,6 +369,11 @@ class BaseModelMerger(ABC):
         target_torch_dtype, target_dtype_str = self.get_target_torch_dtype()
         # Keep config aligned so downstream torch_dtype="auto" won't silently upcast to fp32.
         self.model_config.torch_dtype = target_dtype_str
+        # Also patch common nested config dtype fields (e.g. qwen-vl text/vision configs).
+        self._maybe_set_config_dtype(self.model_config, target_dtype_str)
+        for nested_name in ("text_config", "vision_config", "language_config"):
+            if hasattr(self.model_config, nested_name):
+                self._maybe_set_config_dtype(getattr(self.model_config, nested_name), target_dtype_str)
         with init_empty_weights():
             model = auto_model_class.from_config(
                 self.model_config, torch_dtype=target_torch_dtype, trust_remote_code=self.config.trust_remote_code

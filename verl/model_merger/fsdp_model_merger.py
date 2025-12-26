@@ -236,7 +236,9 @@ class FSDPModelMerger(BaseModelMerger):
         auto_model_class = self.get_transformers_auto_model_class()
 
         target_torch_dtype, _ = self.get_target_torch_dtype()
-        hf_model = auto_model_class.from_pretrained(self.config.test_hf_dir, torch_dtype=target_torch_dtype)
+        hf_model = auto_model_class.from_pretrained(
+            self.config.test_hf_dir, torch_dtype=target_torch_dtype, trust_remote_code=self.config.trust_remote_code
+        )
         hf_state_dict = hf_model.state_dict()
         del hf_model
 
