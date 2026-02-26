@@ -93,7 +93,7 @@ from verl.workers.sharding_manager.fsdp_ulysses import FSDPUlyssesShardingManage
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
-from utils.log_utils import logger as local_logger
+from pt_utils.log_utils import logger as local_logger
 
 device_name = get_device_name()
 
