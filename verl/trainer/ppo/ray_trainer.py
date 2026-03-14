@@ -493,6 +493,18 @@ class RayPPOTrainer:
 
         return gen_batch
 
+    def _prune_post_generation_batch(self, batch: DataProto) -> None:
+        """Drop rollout-only payloads before repeated training batches hit Ray/object-store memory."""
+        removable_non_tensor_keys = {"raw_prompt", "tools_kwargs", "interaction_kwargs", "index"}
+        if self.config.reward.reward_model.enable:
+            removable_non_tensor_keys.discard("raw_prompt")
+
+        for key in removable_non_tensor_keys:
+            batch.non_tensor_batch.pop(key, None)
+
+        if batch.batch is not None and "dummy_tensor" in batch.batch.keys():
+            batch.batch.pop("dummy_tensor")
+
     def _compute_reward_colocate(self, batch: DataProto) -> tuple[torch.Tensor, dict[str, Any]] | torch.Tensor:
         """
         compute reward use colocate reward model
@@ -559,6 +571,8 @@ class RayPPOTrainer:
 
             # unpad
             test_output_gen_batch = unpad_dataproto(test_output_gen_batch_padded, pad_size=pad_size)
+            self._prune_post_generation_batch(test_batch)
+            self._prune_post_generation_batch(test_output_gen_batch)
 
             print("validation generation end")
 
@@ -1327,6 +1341,8 @@ class RayPPOTrainer:
 
                         timing_raw.update(gen_batch_output.meta_info["timing"])
                         gen_batch_output.meta_info.pop("timing", None)
+                        self._prune_post_generation_batch(batch)
+                        self._prune_post_generation_batch(gen_batch_output)
 
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
                         with marked_timer("gen_max", timing_raw, color="purple"):
