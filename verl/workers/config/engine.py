@@ -108,6 +108,11 @@ class EngineConfig(BaseConfig):
     full_determinism: bool = False
     router_replay: EngineRouterReplayConfig = field(default_factory=EngineRouterReplayConfig)
 
+    # Max number of images processed per vision model forward call.
+    # When set, the vision model forward is chunked to avoid OOM from processing
+    # all images at once. None means no chunking (process all images in one call).
+    vision_batch_size: Optional[int] = None
+
     def __post_init__(self):
         pass
         # TODO: turn on this check after we reorg config

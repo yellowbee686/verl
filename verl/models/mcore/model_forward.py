@@ -14,6 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
+from functools import wraps
+from typing import Optional
+
 import torch
 from torch.nested._internal.nested_tensor import NestedTensor
 
@@ -30,6 +34,58 @@ from .util import (
     preprocess_packed_seqs,
     preprocess_thd_no_padding,
 )
+
+logger = logging.getLogger(__name__)
+
+
+def patch_vision_forward_chunked(model_module_list: torch.nn.ModuleList, max_images_per_forward: int) -> None:
+    """Patch vision model forward to process images in smaller chunks.
+
+    The vision model in VLMs (e.g. Qwen3.5) processes ALL image patches at once,
+    which can cause OOM when a single sample contains many images. Since the
+    vision model uses per-image attention boundaries (cu_seqlens from grid_thw),
+    images are independent and can be processed in separate chunks with identical
+    results.
+
+    This reduces peak GPU memory by limiting intermediate activation sizes
+    (attention Q/K/V, rotary embeddings, etc.) per forward call.
+    """
+    for model_chunk in model_module_list:
+        unwrapped = unwrap_model(model_chunk)
+        if not hasattr(unwrapped, "vision_model"):
+            continue
+
+        vision_model = unwrapped.vision_model
+        original_forward = vision_model.forward
+
+        @wraps(original_forward)
+        def _chunked_forward(
+            pixel_values: torch.Tensor,
+            grid_thw: Optional[torch.Tensor] = None,
+            *args,
+            _orig_fn=original_forward,
+            _max_imgs=max_images_per_forward,
+            **kwargs,
+        ) -> torch.Tensor:
+            if grid_thw is None or grid_thw.shape[0] <= _max_imgs:
+                return _orig_fn(pixel_values, grid_thw=grid_thw, *args, **kwargs)
+
+            patches_per_image = grid_thw.prod(dim=-1)
+            pixel_chunks = pixel_values.split(patches_per_image.tolist(), dim=0)
+            num_images = grid_thw.shape[0]
+
+            outputs: list[torch.Tensor] = []
+            for start in range(0, num_images, _max_imgs):
+                end = min(start + _max_imgs, num_images)
+                chunk_pixels = torch.cat(pixel_chunks[start:end], dim=0)
+                chunk_grid = grid_thw[start:end]
+                output = _orig_fn(chunk_pixels, grid_thw=chunk_grid, *args, **kwargs)
+                outputs.append(output)
+
+            return torch.cat(outputs, dim=0)
+
+        vision_model.forward = _chunked_forward
+        logger.info("Patched vision model forward with max_images_per_forward=%d", max_images_per_forward)
 
 
 def model_forward_gen(vision_model: bool = False):

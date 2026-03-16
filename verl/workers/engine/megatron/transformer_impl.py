@@ -257,6 +257,11 @@ class MegatronEngine(BaseEngine):
         if self.enable_routing_replay:
             print(f"routing replay layers: {len(RouterReplay.router_instances)}")
 
+        if self.engine_config.vision_batch_size is not None:
+            from verl.models.mcore.model_forward import patch_vision_forward_chunked
+
+            patch_vision_forward_chunked(module, self.engine_config.vision_batch_size)
+
         return module
 
     def _maybe_enable_fused_kernels(self):
