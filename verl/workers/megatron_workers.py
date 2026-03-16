@@ -595,6 +595,11 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
                 override_transformer_config=override_transformer_config,
                 override_ddp_config=override_ddp_config,
             )
+            vision_bs = self.config.actor.megatron.get("vision_batch_size", None)
+            if vision_bs is not None:
+                from verl.models.mcore.model_forward import patch_vision_forward_chunked
+
+                patch_vision_forward_chunked(self.actor_module, vision_bs)
             if self._is_offload_param:
                 offload_megatron_model_to_cpu(self.actor_module)
                 log_gpu_memory_usage("After offload actor params and grad during init", logger=logger)
@@ -628,6 +633,11 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
                 override_model_config=override_model_config,
                 override_transformer_config=override_transformer_config,
             )
+            ref_vision_bs = self.config.ref.megatron.get("vision_batch_size", None)
+            if ref_vision_bs is not None:
+                from verl.models.mcore.model_forward import patch_vision_forward_chunked
+
+                patch_vision_forward_chunked(self.ref_module, ref_vision_bs)
             log_gpu_memory_usage("After ref model init", logger=logger)
             self.ref_policy = MegatronPPOActor(
                 config=self.config.ref,

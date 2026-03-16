@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 
 
 def patch_vision_forward_chunked(model_module_list: torch.nn.ModuleList, max_images_per_forward: int) -> None:
-    """Patch vision model forward to process images in smaller chunks.
+    """Patch vision model forward to process images in smaller chunks under no_grad.
 
     The vision model in VLMs (e.g. Qwen3.5) processes ALL image patches at once,
     which can cause OOM when a single sample contains many images. Since the
@@ -47,8 +47,11 @@ def patch_vision_forward_chunked(model_module_list: torch.nn.ModuleList, max_ima
     images are independent and can be processed in separate chunks with identical
     results.
 
-    This reduces peak GPU memory by limiting intermediate activation sizes
-    (attention Q/K/V, rotary embeddings, etc.) per forward call.
+    Two memory optimisations are applied:
+    1. Chunking: limit the number of images processed per forward call.
+    2. no_grad: the vision encoder is treated as frozen during RL/GSPO training,
+       so we disable gradient tracking to avoid retaining intermediate activations
+       for the backward pass.
     """
     for model_chunk in model_module_list:
         unwrapped = unwrap_model(model_chunk)
@@ -67,25 +70,26 @@ def patch_vision_forward_chunked(model_module_list: torch.nn.ModuleList, max_ima
             _max_imgs=max_images_per_forward,
             **kwargs,
         ) -> torch.Tensor:
-            if grid_thw is None or grid_thw.shape[0] <= _max_imgs:
-                return _orig_fn(pixel_values, grid_thw=grid_thw, *args, **kwargs)
+            with torch.no_grad():
+                if grid_thw is None or grid_thw.shape[0] <= _max_imgs:
+                    return _orig_fn(pixel_values, grid_thw=grid_thw, *args, **kwargs)
 
-            patches_per_image = grid_thw.prod(dim=-1)
-            pixel_chunks = pixel_values.split(patches_per_image.tolist(), dim=0)
-            num_images = grid_thw.shape[0]
+                patches_per_image = grid_thw.prod(dim=-1)
+                pixel_chunks = pixel_values.split(patches_per_image.tolist(), dim=0)
+                num_images = grid_thw.shape[0]
 
-            outputs: list[torch.Tensor] = []
-            for start in range(0, num_images, _max_imgs):
-                end = min(start + _max_imgs, num_images)
-                chunk_pixels = torch.cat(pixel_chunks[start:end], dim=0)
-                chunk_grid = grid_thw[start:end]
-                output = _orig_fn(chunk_pixels, grid_thw=chunk_grid, *args, **kwargs)
-                outputs.append(output)
+                outputs: list[torch.Tensor] = []
+                for start in range(0, num_images, _max_imgs):
+                    end = min(start + _max_imgs, num_images)
+                    chunk_pixels = torch.cat(pixel_chunks[start:end], dim=0)
+                    chunk_grid = grid_thw[start:end]
+                    output = _orig_fn(chunk_pixels, grid_thw=chunk_grid, *args, **kwargs)
+                    outputs.append(output)
 
-            return torch.cat(outputs, dim=0)
+                return torch.cat(outputs, dim=0)
 
         vision_model.forward = _chunked_forward
-        logger.info("Patched vision model forward with max_images_per_forward=%d", max_images_per_forward)
+        logger.info("Patched vision model forward with max_images_per_forward=%d (no_grad)", max_images_per_forward)
 
 
 def model_forward_gen(vision_model: bool = False):
