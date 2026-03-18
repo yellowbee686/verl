@@ -38,6 +38,30 @@ from .util import (
 logger = logging.getLogger(__name__)
 
 
+def _concat_chunked_output_values(values: list):
+    """Concatenate chunked vision-model outputs while preserving HF ModelOutput types."""
+    first = values[0]
+    if first is None:
+        return None
+    if isinstance(first, torch.Tensor):
+        return torch.cat(values, dim=0)
+    if isinstance(first, tuple):
+        if not all(len(v) == len(first) for v in values):
+            raise TypeError("chunked vision model outputs contain tuples with mismatched lengths")
+        return tuple(_concat_chunked_output_values([v[idx] for v in values]) for idx in range(len(first)))
+    if isinstance(first, list):
+        if not all(len(v) == len(first) for v in values):
+            raise TypeError("chunked vision model outputs contain lists with mismatched lengths")
+        return [_concat_chunked_output_values([v[idx] for v in values]) for idx in range(len(first))]
+    if hasattr(first, "__dataclass_fields__"):
+        field_values = {
+            field_name: _concat_chunked_output_values([getattr(v, field_name) for v in values])
+            for field_name in first.__dataclass_fields__
+        }
+        return type(first)(**field_values)
+    return first
+
+
 def patch_vision_forward_chunked(model_module_list: torch.nn.ModuleList, max_images_per_forward: int) -> None:
     """Patch vision model forward to process images in smaller chunks under no_grad.
 
@@ -78,7 +102,7 @@ def patch_vision_forward_chunked(model_module_list: torch.nn.ModuleList, max_ima
                 pixel_chunks = pixel_values.split(patches_per_image.tolist(), dim=0)
                 num_images = grid_thw.shape[0]
 
-                outputs: list[torch.Tensor] = []
+                outputs = []
                 for start in range(0, num_images, _max_imgs):
                     end = min(start + _max_imgs, num_images)
                     chunk_pixels = torch.cat(pixel_chunks[start:end], dim=0)
@@ -86,7 +110,7 @@ def patch_vision_forward_chunked(model_module_list: torch.nn.ModuleList, max_ima
                     output = _orig_fn(chunk_pixels, grid_thw=chunk_grid, *args, **kwargs)
                     outputs.append(output)
 
-                return torch.cat(outputs, dim=0)
+                return _concat_chunked_output_values(outputs)
 
         vision_model.forward = _chunked_forward
         logger.info("Patched vision model forward with max_images_per_forward=%d (no_grad)", max_images_per_forward)
