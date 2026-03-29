@@ -400,11 +400,13 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             metadata=sharded_sd_metadata,
         )
         log_with_rank(f"Generated state dict for loading: {sharded_state_dict.keys()}", rank=self.rank, logger=logger)
+        use_fully_parallel_wrapper = self.should_load_model and self.use_dist_checkpointing
 
         # Load Dist Checkpointing
         state_dict = load_dist_checkpointing(
             sharded_state_dict=sharded_state_dict,
             ckpt_dir=dist_checkpoint_path,
+            use_fully_parallel_wrapper=use_fully_parallel_wrapper,
         )
 
         if self.should_load_model and self.use_dist_checkpointing:
@@ -524,6 +526,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                 ckpt_path=dist_checkpoint_path,
                 async_save=self.checkpoint_config.async_save,
                 content_metadata=sharded_sd_metadata,
+                use_fully_parallel_wrapper=True,
             )
 
             # Synchronize all async save requests
@@ -547,6 +550,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                 ckpt_path=dist_checkpoint_path,
                 async_save=self.checkpoint_config.async_save,
                 content_metadata=sharded_sd_metadata,
+                use_fully_parallel_wrapper=False,
             )
 
             # Synchronize all async save requests
