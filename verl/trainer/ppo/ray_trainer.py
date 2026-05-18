@@ -22,6 +22,7 @@ import json
 import os
 import uuid
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from pprint import pprint
 from typing import Any, Optional
 
@@ -319,6 +320,7 @@ class RayPPOTrainer:
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
 
         self.checkpoint_manager = None
+        self._init_dump_executor()
 
     def _create_dataloader(self, train_dataset, val_dataset, collate_fn, train_sampler: Optional[Sampler]):
         """
@@ -402,10 +404,11 @@ class RayPPOTrainer:
         except Exception as e:
             print(f"Warning: Could not set total_training_steps in config. Structure missing? Error: {e}")
 
-    def _dump_generations(self, inputs, outputs, gts, scores, reward_extra_infos_dict, dump_path):
-        """Dump rollout/validation samples as JSONL."""
+    @staticmethod
+    def _write_generations(inputs, outputs, gts, scores, reward_extra_infos_dict, dump_path, global_steps):
+        """Write generation samples as JSONL (runs in background thread)."""
         os.makedirs(dump_path, exist_ok=True)
-        filename = os.path.join(dump_path, f"{self.global_steps}.jsonl")
+        filename = os.path.join(dump_path, f"{global_steps}.jsonl")
 
         n = len(inputs)
         base_data = {
@@ -413,22 +416,54 @@ class RayPPOTrainer:
             "output": outputs,
             "gts": gts,
             "score": scores,
-            "step": [self.global_steps] * n,
+            "step": [global_steps] * n,
         }
 
         for k, v in reward_extra_infos_dict.items():
             if len(v) == n:
                 base_data[k] = v
 
-        lines = []
-        for i in range(n):
-            entry = {k: v[i] for k, v in base_data.items()}
-            lines.append(json.dumps(entry, ensure_ascii=False, default=str))
-
         with open(filename, "w") as f:
-            f.write("\n".join(lines) + "\n")
+            for i in range(n):
+                entry = {k: v[i] for k, v in base_data.items()}
+                f.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
 
         print(f"Dumped generations to {filename}")
+
+    def _dump_generations(self, inputs, outputs, gts, scores, reward_extra_infos_dict, dump_path):
+        """Dump rollout/validation samples as JSONL asynchronously."""
+        global_steps = self.global_steps
+        future = self._dump_executor.submit(
+            self._write_generations,
+            inputs,
+            outputs,
+            gts,
+            scores,
+            reward_extra_infos_dict,
+            dump_path,
+            global_steps,
+        )
+        self._dump_futures.append(future)
+        # Clean up completed futures and surface any exceptions early
+        still_pending = []
+        for f in self._dump_futures:
+            if f.done():
+                f.result()  # re-raises if the write failed
+            else:
+                still_pending.append(f)
+        self._dump_futures = still_pending
+
+    def _init_dump_executor(self):
+        """Create or recreate the dump executor and futures list."""
+        self._dump_executor = ThreadPoolExecutor(max_workers=1)
+        self._dump_futures = []
+
+    def _shutdown_dump_executor(self):
+        """Drain pending dump futures and shut down the executor."""
+        for f in self._dump_futures:
+            f.result()
+        self._dump_futures.clear()
+        self._dump_executor.shutdown(wait=True)
 
     def _log_rollout_data(
         self, batch: DataProto, reward_extra_infos_dict: dict, timing_raw: dict, rollout_data_dir: str
@@ -447,7 +482,7 @@ class RayPPOTrainer:
             sample_gts = [item.non_tensor_batch.get("reward_model", {}).get("ground_truth", None) for item in batch]
 
             reward_extra_infos_to_dump = {
-                k: (v.tolist() if isinstance(v, np.ndarray) else v) for k, v in reward_extra_infos_dict.items()
+                k: (v.tolist() if hasattr(v, "tolist") else v) for k, v in reward_extra_infos_dict.items()
             }
             if "request_id" in batch.non_tensor_batch:
                 reward_extra_infos_to_dump.setdefault(
@@ -1281,6 +1316,9 @@ class RayPPOTrainer:
         to construct the PPO dataflow.
         The light-weight advantage computation is done on the driver process.
         """
+        if self._dump_executor._shutdown:
+            self._init_dump_executor()
+
         from omegaconf import OmegaConf
 
         from verl.utils.tracking import Tracking
@@ -1308,6 +1346,7 @@ class RayPPOTrainer:
             pprint(f"Initial validation metrics: {val_metrics}")
             logger.log(data=val_metrics, step=self.global_steps)
             if self.config.trainer.get("val_only", False):
+                self._shutdown_dump_executor()
                 return
 
         if self.config.actor_rollout_ref.rollout.skip.get("enable", False):
@@ -1657,6 +1696,7 @@ class RayPPOTrainer:
                 if is_last_step:
                     if hasattr(self.actor_rollout_wg, "async_calls_finalize_fn_exec"):
                         self.actor_rollout_wg.async_calls_finalize_fn_exec(blocking=True)
+                    self._shutdown_dump_executor()
                     pprint(f"Final validation metrics: {last_val_metrics}")
                     progress_bar.close()
                     return
@@ -1666,3 +1706,6 @@ class RayPPOTrainer:
                 if hasattr(self.train_dataset, "on_batch_end"):
                     # The dataset may be changed after each training batch
                     self.train_dataset.on_batch_end(batch=batch)
+
+        # Ensure dump executor is shut down when training loop ends without reaching is_last_step
+        self._shutdown_dump_executor()
