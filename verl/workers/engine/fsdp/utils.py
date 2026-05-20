@@ -23,10 +23,12 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
-def apply_npu_fsdp_patches():
+def apply_npu_fsdp_patches(model_config=None):
     """Apply NPU patches for FSDP backend if NPU is available."""
     if is_npu_available:
         try:
+            if model_config is not None and model_config.get("use_liger", False):
+                return
             import verl.models.transformers.npu_patch  # noqa
 
             if torch.distributed.is_initialized() and torch.distributed.get_rank() == 0:
