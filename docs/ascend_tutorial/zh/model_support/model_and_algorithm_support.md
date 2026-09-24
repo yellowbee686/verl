@@ -1,6 +1,6 @@
 # NPU 模型与算法支持情况
 
-Last updated: 05/14/2026.
+Last updated: 09/21/2026.
 
 ## Table 1 RL Algorithms
 
@@ -39,8 +39,8 @@ Last updated: 05/14/2026.
 | 34 | Qwen3-VL-30B-A3B-Instruct | DAPO | [30B](https://huggingface.co/Qwen/Qwen3-VL-30B-A3B-Instruct) | FSDP2 | vllm | [`link`](https://github.com/verl-project/verl-recipe/blob/main/dapo/run_dapo_qwen3_vl_30b_fsdp2_npu.sh) | - | Atlas 200T A2 Box16, Atlas 800T A3 |
 | 35 | Qwen3.5-27B | GRPO | [27B](https://huggingface.co/Qwen/Qwen3.5-27B) | FSDP2 | vllm | [`link`](https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen3_5_27b_fsdp.sh) | - | Atlas 900 A2 PODc, Atlas 200T A2 Box16, Atlas 800T A3 |
 | 36 | Qwen3.5-35B-A3B | GRPO | [35B](https://huggingface.co/Qwen/Qwen3.5-35B-A3B) | FSDP2 | vllm | [`link`](https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen3_5_35b_fsdp.sh) | - | Atlas 200T A2 Box16, Atlas 800T A3 |
-| 37 | Qwen3.5-122B-A10B | GRPO | [122B](https://huggingface.co/Qwen/Qwen3.5-122B-A10B) | Megatron | vllm | [`link`](https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen3_5_122b_a10b_megatron.sh) | [`link`](examples/qwen3_5_megatron_npu.md) | Atlas 800T A3 |
-| 38 | Qwen3-Next-80B-A3B-Instruct | GRPO | [80B](https://huggingface.co/Qwen/Qwen3-Next-80B-A3B-Instruct) | FSDP2 | vllm | [`link`](https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen3_next_80b_a3b_fsdp.sh) | - | Atlas 900 A2 PODc, Atlas 200T A2 Box16, Atlas 800T A3 |
+| 37 | Qwen3.5-122B-A10B | GRPO | [122B](https://huggingface.co/Qwen/Qwen3.5-122B-A10B) | Megatron | vllm | [`link`](https://github.com/verl-project/verl/blob/main/examples/ascend_extras/grpo_trainer/run_qwen3_5_122b_a10b_32k_megatron.sh) | [`link`](examples/qwen3_5_megatron_npu.md) | Atlas 800T A3 |
+| 38 | Qwen3-Next-80B-A3B-Instruct | GRPO | [80B](https://huggingface.co/Qwen/Qwen3-Next-80B-A3B-Instruct) | FSDP2 | vllm | [`link`](https://github.com/verl-project/verl/blob/main/examples/ascend_extras/grpo_trainer/run_qwen3_next_80b_fsdp.sh) | - | Atlas 900 A2 PODc, Atlas 200T A2 Box16, Atlas 800T A3 |
 | 39 | DeepSeek-V3 | DAPO | [671B](https://huggingface.co/deepseek-ai/DeepSeek-V3-Base/) | Megatron | vllm | [`link`](https://github.com/verl-project/verl-ascend-recipe/blob/main/dapo/DeepSeek-V3/scripts/run_dapo_deepseekv3_671b_megatron_8k_npu.sh) | [`link`](https://github.com/verl-project/verl-ascend-recipe/blob/main/dapo/DeepSeek-V3/README.md) | Atlas 800T A3 |
 | 40 | Qwen3-1.7B | GRPO | [1.7B](https://huggingface.co/Qwen/Qwen3-1.7B) | VeOmni | vllm | [`link`](https://github.com/verl-project/verl-ascend-recipe/blob/main/verl_ascend_practice/run_qwen3_1_7b_npu.sh) | - | Atlas 800T A3 |
 | 41 | Qwen3-30B-A3B | GRPO | [30B](https://huggingface.co/Qwen/Qwen3-30B-A3B) | VeOmni | vllm | [`link`](https://github.com/verl-project/verl/blob/main/examples/grpo_trainer/run_qwen3_30b_veomni.sh) | - | Atlas 800T A3 |
