@@ -45,7 +45,7 @@ name = "transferqueue"
 
 [[manifest.dependency-metadata]]
 name = "veomni"
-version = "0.1.11"
+version = "0.1.12"
 
 [[package]]
 name = "absl-py"
@@ -5127,12 +5127,8 @@ wheels = [
 
 [[package]]
 name = "veomni"
-version = "0.1.11"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/90/87/ef3e7edc90ed5266b5fcd6210b439e6bd86eddd6add6d46807465f0bc0cb/veomni-0.1.11.tar.gz", hash = "sha256:d4f2400384a2bf9cc91f786f426e684bf289d8b337a966c3419f80df7287b797", size = 1023124, upload-time = "2026-05-26T08:04:38.663Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/8f/16/b70afce7300c6680d8460923c31c315f0aa64e55aea4f6aeee780da6ad91/veomni-0.1.11-py3-none-any.whl", hash = "sha256:fe399ead11350fa3d53cc53293cd60d0c1042f2fa15d599aeb89db9aa417b129", size = 1288446, upload-time = "2026-05-26T08:04:36.131Z" },
-]
+version = "0.1.12"
+source = { git = "https://github.com/ByteDance-Seed/VeOmni.git?rev=10a26aca258f91a7af3e698cc0db8c6c51705989#10a26aca258f91a7af3e698cc0db8c6c51705989" }
 
 [[package]]
 name = "verl"
@@ -5532,7 +5528,7 @@ requires-dist = [
     { name = "trl", marker = "extra == 'fsdp'", specifier = "==0.27.0" },
     { name = "trl", marker = "extra == 'megatron'", specifier = "==0.27.0" },
     { name = "uvicorn", marker = "extra == 'verl-core'" },
-    { name = "veomni", marker = "extra == 'veomni-sft'", specifier = "==0.1.11" },
+    { name = "veomni", marker = "extra == 'veomni-sft'", git = "https://github.com/ByteDance-Seed/VeOmni.git?rev=10a26aca258f91a7af3e698cc0db8c6c51705989" },
     { name = "verl", extras = ["cupy-cu130"], marker = "extra == 'fsdp'" },
     { name = "verl", extras = ["cupy-cu130"], marker = "extra == 'megatron'" },
     { name = "verl", extras = ["flash-attn-cu130torch213"], marker = "extra == 'fsdp'" },

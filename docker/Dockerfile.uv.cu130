@@ -6,10 +6,10 @@
 # [tool.uv].conflicts, so a single committed uv.lock resolves them all:
 #
 #   * cu13.0 (this file, base nvidia/cuda:13.0.2): vllm, sglang, fsdp,
-#     megatron, cpu — all on torch 2.13 / cu130. The `prefetch` below is
-#     scoped to `cu130 dev`.
+#     megatron, VeOmni (fsdp + veomni-sft), cpu — all on torch 2.13 / cu130.
+#     The `prefetch` below is scoped to `cu130 dev`.
 #   * DEFERRED in pyproject.toml (commented out, re-enable later):
-#     - the cu12.9 / torch-2.9.1 world (veomni, nemoautomodel) — its image
+#     - the cu12.9 / torch-2.9.1 world (nemoautomodel) — its image
 #       docker/Dockerfile.uv.cu129 was removed; recover it from git history.
 #     - trtllm (tensorrt-llm), a CUDA-13 RC sdist whose dependency tree
 #       explodes uv's resolver. Revisit on the cu130 stack when it ships a
