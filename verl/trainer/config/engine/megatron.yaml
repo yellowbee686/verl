@@ -153,3 +153,6 @@ qat:
   activation_observer: null
   # Path to quantization config JSON for vLLM weight export
   quantization_config_path: null
+
+# Maximum token rows in score-centering FP32 vocabulary workspaces.
+score_centering_chunk_size: 128
