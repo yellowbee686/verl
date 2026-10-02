@@ -85,6 +85,62 @@ def _validate_router_replay_config(actor_config: Any, rollout_correction: Any) -
         )
 
 
+def _validate_megatron_score_centering_config(config: DictConfig) -> None:
+    """Validate the supported Megatron path without changing the caller configuration."""
+    correction = config.algorithm.get("rollout_correction")
+    if not correction or not correction.get("score_centering", False):
+        return
+    actor = config.actor_rollout_ref.actor
+    if actor.strategy != "megatron":
+        return
+    rollout = config.actor_rollout_ref.rollout
+    model = config.actor_rollout_ref.model
+    checks = {
+        "bypass_mode=true": correction.bypass_mode,
+        "loss_type=reinforce": correction.loss_type == "reinforce",
+        "rollout_is=null or token": correction.rollout_is in (None, "token"),
+        "rollout_rs=null": correction.rollout_rs is None,
+        "actor rollout_rs=null": actor.policy_loss.rollout_correction.get("rollout_rs") is None,
+        "rollout_is_batch_normalize=false": not correction.rollout_is_batch_normalize,
+        "actor.policy_loss.loss_mode=bypass_mode": actor.policy_loss.get("loss_mode") == "bypass_mode",
+        "model.use_fused_kernels=false": not model.get("use_fused_kernels", False),
+        "model.mtp.enable=false": not model.get("mtp", {}).get("enable", False),
+        "rollout.name=vllm": rollout.name == "vllm",
+        "rollout.calculate_log_probs=true": rollout.calculate_log_probs,
+        "rollout.logprobs_mode=processed_logprobs": rollout.logprobs_mode == "processed_logprobs",
+        "stochastic training rollout": rollout.get("do_sample", True) and rollout.get("temperature", 1.0) >= 1e-5,
+        "rollout.mtp.enable=false": not rollout.get("mtp", {}).get("enable", False),
+        "no speculative rollout": not rollout.get("engine_kwargs", {}).get("vllm", {}).get("speculative_config"),
+        "distillation.enabled=false": not config.get("distillation", {}).get("enabled", False),
+        "rollout.top_p=1.0": rollout.get("top_p", 1.0) == 1.0,
+        "rollout.top_k=-1": rollout.get("top_k", -1) == -1,
+        "rollout.topk_log_probs>0": rollout.get("topk_log_probs", 0) > 0,
+        "actor.calculate_sum_pi_squared=false": not actor.get("calculate_sum_pi_squared", False),
+        "actor.use_fused_kernels=false": not actor.get("use_fused_kernels", False),
+        "megatron.score_centering_chunk_size>0": actor.get("megatron", {}).get("score_centering_chunk_size", 128) > 0,
+    }
+    engine = actor.get("megatron", {})
+    vllm_args = rollout.get("engine_kwargs", {}).get("vllm", {})
+    checks["effective vLLM processed_logprobs"] = (
+        vllm_args.get("logprobs_mode", rollout.logprobs_mode) == "processed_logprobs"
+    )
+    checks["vLLM enable_trace_replay=false"] = not vllm_args.get("enable_trace_replay", False)
+    checks["megatron.dynamic_context_parallel=false"] = not engine.get("dynamic_context_parallel", False)
+    checks["megatron.pad_to_length=false"] = not engine.get("pad_to_length", False)
+    # Keep the existing BSHD/per-token-loss restriction; relaxing it is a separate change.
+    checks["BSHD requires context_parallel_size=1"] = (
+        engine.get("use_remove_padding", True) or engine.get("context_parallel_size", 1) == 1
+    )
+    invalid = [name for name, valid in checks.items() if not valid]
+    if invalid:
+        raise ValueError("Score centering requires " + ", ".join(invalid))
+    # Validate the same threshold parser used by the sampled-token TIS path.
+    if correction.rollout_is is not None:
+        from verl.trainer.ppo.rollout_corr_helper import _parse_rollout_is_threshold
+
+        _parse_rollout_is_threshold(correction.rollout_is_threshold)
+
+
 def _validate_score_centering_config(config: DictConfig) -> None:
     algorithm_rc = config.algorithm.get("rollout_correction") or {}
     actor_rc = config.actor_rollout_ref.actor.policy_loss.get("rollout_correction") or {}
@@ -107,14 +163,15 @@ def _validate_score_centering_config(config: DictConfig) -> None:
             )
     if not config.trainer.get("use_v1", True):
         raise ValueError("score centering requires the v1 trainer (trainer.use_v1=True).")
-    if config.actor_rollout_ref.actor.get("strategy") not in ("fsdp", "fsdp2"):
-        raise ValueError("score centering requires actor_rollout_ref.actor.strategy=fsdp or fsdp2.")
+    if config.actor_rollout_ref.actor.get("strategy") not in ("fsdp", "fsdp2", "megatron"):
+        raise ValueError("score centering requires actor_rollout_ref.actor.strategy=fsdp, fsdp2 or megatron.")
     if config.actor_rollout_ref.rollout.get("name") != "vllm":
         raise ValueError("score centering requires actor_rollout_ref.rollout.name=vllm.")
     if not config.actor_rollout_ref.rollout.get("topk_log_probs", 0):
         raise ValueError("score centering requires actor_rollout_ref.rollout.topk_log_probs > 0.")
     if (config.get("distillation") or {}).get("enabled", False):
         raise ValueError("score centering cannot be combined with distillation.")
+    _validate_megatron_score_centering_config(config)
 
 
 def validate_config(

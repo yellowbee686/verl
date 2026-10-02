@@ -19,7 +19,7 @@ sampler's tail mass, so the centering term only needs the k head log-probs of th
 
 import math
 from collections.abc import Callable
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 from tensordict import TensorDict
@@ -202,16 +202,29 @@ def score_centering_correction(
             train_head_mass: Trainer's head probability mass, shape (N,), dtype float32.
     """
     train_head_log_probs = train_head_log_probs.float()
-    with torch.no_grad():
-        p = train_head_log_probs.exp()
-        q = sampler_head_log_probs.float().exp()
-        p_mass, q_mass = p.sum(-1), q.sum(-1)
-        rho = (1 - q_mass).clamp_min(eps) / (1 - p_mass).clamp_min(eps)
-        alpha = rho * weight_fn(1.0 / rho)
-        head_weights = weight_fn((train_head_log_probs - sampler_head_log_probs.float()).exp())
-        residual = q * head_weights - alpha.unsqueeze(-1) * p
+    residual, q_mass, p_mass = score_centering_residual(
+        train_head_log_probs, sampler_head_log_probs.float(), weight_fn, eps
+    )
     correction = (residual * train_head_log_probs).sum(-1)
     return correction, q_mass, p_mass
+
+
+@torch.no_grad()
+def score_centering_residual(
+    train_head_log_probs: torch.Tensor,
+    sampler_head_log_probs: torch.Tensor,
+    weight_fn: Callable[[torch.Tensor], torch.Tensor],
+    eps: float = 1e-6,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return detached head coefficients and masses in the input computation dtype."""
+    p = train_head_log_probs.exp()
+    q = sampler_head_log_probs.exp()
+    p_mass, q_mass = p.sum(-1), q.sum(-1)
+    rho = (1 - q_mass).clamp_min(eps) / (1 - p_mass).clamp_min(eps)
+    alpha = rho * weight_fn(1.0 / rho)
+    head_weights = weight_fn((train_head_log_probs - sampler_head_log_probs).exp())
+    residual = q * head_weights - alpha.unsqueeze(-1) * p
+    return residual, q_mass, p_mass
 
 
 def score_centering_logits_processor(
@@ -258,10 +271,15 @@ def score_centering_ppo_loss(
     config: ActorConfig,
     model_output: dict = None,
     data: TensorDict = None,
-    dp_group=None,
+    dp_group: Any = None,
     student_logits: torch.Tensor = None,
     data_format: str = "thd",
-):
+    score_centering_inputs: tuple[torch.Tensor, torch.Tensor] | None = None,
+    score_centering_group: Any = None,
+    score_centering_labels: torch.Tensor | None = None,
+    score_centering_temperature: torch.Tensor | None = None,
+    calculate_entropy: bool = False,
+) -> tuple[torch.Tensor, dict[str, Any]] | dict[str, torch.Tensor]:
     """Actor loss function used both for the logits processor and the final policy loss.
     - student_logits is not None, compute the centering term in the logits processor.
     - student_logits is None, compute the final policy loss.
@@ -271,13 +289,33 @@ def score_centering_ppo_loss(
         model_output: Model output, including log_probs and sc_correction.
         data: Micro input batch, contains the nested rollout top-k head.
         dp_group: Data parallel group for ``ppo_loss``.
-        student_logits: (1, nnz/sp, V).
-        data_format: "thd" or "bshd". Only "thd" is supported.
+        student_logits: FSDP temperature-scaled logits, or raw Megatron TP-sharded logits.
+        data_format: "thd" or "bshd"; FSDP supports "thd" only.
+        score_centering_inputs: Megatron sampler heads already aligned to the local CP rows.
+        score_centering_group: Megatron tensor parallel group.
+        score_centering_labels: Sampled-token labels on the same rows.
+        score_centering_temperature: Per-row temperatures for the joint Megatron computation.
+        calculate_entropy: Include entropy in the joint Megatron outputs.
 
     Returns:
         student_logits is not None: dict from ``score_centering_logits_processor``.
         student_logits is None: the (loss, metrics) tuple from ``ppo_loss``.
     """
+    if student_logits is not None and config.strategy == "megatron":
+        from verl.utils.megatron.score_centering import compute_policy_outputs_from_logits
+
+        if score_centering_inputs is None or score_centering_labels is None or score_centering_temperature is None:
+            raise ValueError("Megatron score centering requires heads, labels and temperatures aligned with logits")
+        return compute_policy_outputs_from_logits(
+            student_logits,
+            score_centering_labels,
+            *score_centering_inputs,
+            score_centering_temperature,
+            config.policy_loss.rollout_correction,
+            score_centering_group,
+            calculate_entropy,
+            chunk_size=config.megatron.get("score_centering_chunk_size", 128),
+        )
     if student_logits is not None:
         return score_centering_logits_processor(student_logits, data, config, data_format)
     rollout_correction = config.policy_loss.get("rollout_correction", None) or {}
@@ -285,6 +323,6 @@ def score_centering_ppo_loss(
         # an entrypoint that never sets the micro-batch flag would otherwise train plain bypass PG
         raise RuntimeError(
             "score centering is enabled but the logits processor did not run: the trainer must set the "
-            "score_centering micro-batch flag (supported by the v1 trainer only)."
+            "score_centering micro-batch flag before actor training."
         )
     return ppo_loss(config, model_output, data, dp_group)

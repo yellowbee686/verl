@@ -190,6 +190,8 @@ class McoreEngineConfig(EngineConfig):
     dynamic_context_parallel: bool = False
     entropy_from_logits_with_chunking: bool = False
     entropy_from_logits_chunk_size: int = 2048
+    # Maximum token rows in score-centering FP32 vocabulary workspaces.
+    score_centering_chunk_size: int = 128
     max_seqlen_per_dp_cp_rank: Optional[int] = None
     sequence_parallel: bool = True
     use_distributed_optimizer: bool = True

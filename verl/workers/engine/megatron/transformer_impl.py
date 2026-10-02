@@ -1143,11 +1143,28 @@ class MegatronEngineWithLMHead(MegatronEngine):
         logits_processor_func: Callable,
         batch: TensorDict,
         data_format: str,
+        rollout_topk_ids: torch.Tensor | None = None,
+        rollout_topk_log_probs: torch.Tensor | None = None,
     ):
         assert logits.shape[:2] == label.shape[:2]
         # avoid non-positive temperature such as padding
         temperature[temperature <= 0] = 1e-8
         assert torch.all(temperature > 0).item(), f"temperature tensor must be positive. Got {temperature}"
+        if tu.get_non_tensor_data(batch, key="score_centering", default=False):
+            if calculate_sum_pi_squared:
+                raise ValueError("Score centering does not support sum_pi_squared")
+            # Keep the full vocabulary in model precision. Only chunk-sized
+            # temporaries are promoted, including temperature and sampled CE.
+            return logits_processor_func(
+                student_logits=logits,
+                data=batch,
+                data_format=data_format,
+                score_centering_inputs=(rollout_topk_ids, rollout_topk_log_probs),
+                score_centering_group=mpu.get_tensor_model_parallel_group(),
+                score_centering_labels=label,
+                score_centering_temperature=temperature,
+                calculate_entropy=calculate_entropy,
+            )
         logits.div_(temperature.unsqueeze(dim=-1).to(logits.dtype))
         ret = {}
         # sum_pi_squared is non-destructive — must run before vocab_parallel_entropy.
@@ -1200,6 +1217,9 @@ class MegatronEngineWithLMHead(MegatronEngine):
         calculate_sum_pi_squared = tu.get_non_tensor_data(batch, key="calculate_sum_pi_squared", default=False)
         distillation_use_topk = tu.get_non_tensor_data(batch, key="distillation_use_topk", default=False)
         distillation_only = tu.get_non_tensor_data(batch, key="distillation_only", default=False)
+        score_centering = tu.get_non_tensor_data(batch, key="score_centering", default=False)
+        if score_centering and use_fused_kernels:
+            raise ValueError("Score centering requires use_fused_kernels=False")
         pad_to_length_bucket = (
             self.engine_config.pad_to_length_bucket
             if self.engine_config.pad_to_length and self.engine_config.use_remove_padding
@@ -1327,6 +1347,10 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 "response_attention_mask": response_attention_mask,
             }
 
+            if score_centering:
+                for key in ("rollout_topk_ids", "rollout_topk_log_probs"):
+                    logits_processor_args[key] = batch[key]
+
             mtp_loss_normalization_factor = None
             if (
                 self.model_config.mtp.enable
@@ -1351,6 +1375,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 local_cp_size=local_cp_size,
                 router_padding_mask=router_padding_mask,
                 mtp_loss_normalization_factor=mtp_loss_normalization_factor,
+                keep_logits_in_model_dtype=score_centering,
                 forced_max_seqlen=tu.get_non_tensor_data(data=batch, key="forced_max_seqlen", default=None),
                 pad_to_length_bucket=pad_to_length_bucket,
                 cp_layout=cp_layout,

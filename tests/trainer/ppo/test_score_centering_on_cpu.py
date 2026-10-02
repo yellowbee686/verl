@@ -141,7 +141,7 @@ def test_score_centering_config_skips_checks_when_off():
         (dict(actor_rc={"rollout_is": "sequence"}), "score_centering"),
         (dict(actor_rc={"rollout_is_threshold": 3.0}), "match"),
         ({"trainer.use_v1": False}, "use_v1"),
-        ({"actor_rollout_ref.actor.strategy": "megatron"}, "strategy"),
+        ({"actor_rollout_ref.actor.strategy": "veomni"}, "strategy"),
         ({"actor_rollout_ref.rollout.name": "sglang"}, "vllm"),
         ({"actor_rollout_ref.rollout.topk_log_probs": 0}, "topk_log_probs"),
         ({"distillation.enabled": True}, "distillation"),

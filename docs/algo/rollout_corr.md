@@ -643,10 +643,34 @@ algorithm:
   ```
 
 - Set `actor_rollout_ref.actor.use_fused_kernels: false` (incompatible with fused kernels)
-- v1 trainer (`trainer.use_v1: true`) with an FSDP actor only; single-turn agent loop only
+- v1 trainer (`trainer.use_v1: true`) with an FSDP or Megatron actor; single-turn agent loop only
 - Memory: `8k` bytes per padded prompt+response position on the driver (`k=128`: 1 KB per position)
 - The trainer evaluates the head log-probs in chunks of 4096 positions, with an fp32 workspace of roughly `4096 × vocab × 4` bytes
 - Metrics: `actor/sc_correction`, `actor/sc_sampler_head_mass`, `actor/sc_train_head_mass`
+
+**Megatron actor:**
+
+Use `model_engine=megatron` with the same boolean `score_centering` flag, sampler
+`topk_log_probs`, bypass loss and actor-side correction mirror shown above. The
+Megatron engine computes centering, sampled log-probs and optional entropy
+jointly from TP-sharded logits. The head coefficients and loss are shared with
+FSDP; sampler and trainer data formats do not change.
+
+- Set both `actor_rollout_ref.model.use_fused_kernels=false` and
+  `actor_rollout_ref.actor.use_fused_kernels=false`.
+- `actor_rollout_ref.actor.megatron.score_centering_chunk_size` (default 128)
+  bounds the token rows in each FP32 vocabulary workspace. The full logits and
+  their gradient remain in model precision. This still materializes full logits;
+  it is not a fused LM-head implementation or a guarantee against OOM.
+- THD supports tensor parallelism and static context parallelism. BSHD is limited
+  to CP=1, retaining the existing engine restriction for per-token loss.
+- Dynamic CP, `pad_to_length`, MTP, speculative rollout, `calculate_sum_pi_squared`,
+  independent rejection sampling and legacy trainers are not enabled by this path.
+- CPU tests compare outputs and gradients with a dense reference, including two
+  Gloo TP ranks. Forward alignment tests use model/parallel-state doubles. GPU
+  Megatron training, peak memory and convergence require separate validation.
+
+Example: [`run_qwen2_5_0_5b_score_centering_megatron.sh`](../../examples/rollout_correction/run_qwen2_5_0_5b_score_centering_megatron.sh).
 
 ---
 

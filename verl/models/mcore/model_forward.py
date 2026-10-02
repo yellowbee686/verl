@@ -131,6 +131,7 @@ def gptmodel_forward_model_engine(
     router_padding_mask: torch.Tensor | None = None,
     mtp_loss_normalization_factor: float | None = None,
     position_ids: torch.Tensor | None = None,
+    keep_logits_in_model_dtype: bool = False,
 ):
     """Default forward pass for GPT models with optional sequence packing."""
 
@@ -142,6 +143,9 @@ def gptmodel_forward_model_engine(
     use_fp8_padding = fp8 in ["e4m3", "hybrid"]
 
     model_kwargs = {}
+    if keep_logits_in_model_dtype and (unwrap_model(model).config.bf16 or unwrap_model(model).config.fp16):
+        # Float16Module must not promote the full vocabulary before the SC processor chunks it.
+        model_kwargs["fp32_output"] = False
     if "pixel_values" in multi_modal_inputs:
         model_kwargs["pixel_values"] = multi_modal_inputs["pixel_values"].to(input_ids.device)
     if "image_grid_thw" in multi_modal_inputs:
