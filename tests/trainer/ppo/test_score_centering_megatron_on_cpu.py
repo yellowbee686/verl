@@ -172,7 +172,6 @@ def test_config_validation_is_read_only_and_disabled_is_unchanged() -> None:
         ("algorithm.rollout_correction.rollout_is", "sequence"),
         ("algorithm.rollout_correction.rollout_rs", "seq_mean_k3"),
         ("algorithm.rollout_correction.rollout_is_batch_normalize", True),
-        ("actor_rollout_ref.model.use_fused_kernels", True),
         ("distillation.enabled", True),
     ],
 )
@@ -181,6 +180,13 @@ def test_unsupported_configuration_fails_before_training(path: str, value: objec
     OmegaConf.update(cfg, path, value)
     with pytest.raises(ValueError):
         _validate_score_centering_config(cfg)
+
+
+def test_fused_megatron_score_centering_configuration() -> None:
+    cfg = config()
+    cfg.actor_rollout_ref.model.use_fused_kernels = True
+    cfg.actor_rollout_ref.actor.use_fused_kernels = True
+    _validate_score_centering_config(cfg)
 
 
 @pytest.mark.parametrize("threshold", [None, 2.0, "0.5_2.0"])
@@ -429,7 +435,6 @@ def test_megatron_matches_fsdp_contract_with_int32_heads(threshold: str | float 
         ("trainer.use_v1", False),
         ("actor_rollout_ref.actor.policy_loss.loss_mode", "gspo"),
         ("actor_rollout_ref.actor.policy_loss.rollout_correction.rollout_rs", "seq_mean_k3"),
-        ("actor_rollout_ref.actor.use_fused_kernels", True),
         ("actor_rollout_ref.actor.calculate_sum_pi_squared", True),
         ("actor_rollout_ref.actor.megatron.dynamic_context_parallel", True),
         ("actor_rollout_ref.actor.megatron.pad_to_length", True),

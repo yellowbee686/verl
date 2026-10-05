@@ -1245,8 +1245,6 @@ class MegatronEngineWithLMHead(MegatronEngine):
         distillation_use_topk = tu.get_non_tensor_data(batch, key="distillation_use_topk", default=False)
         distillation_only = tu.get_non_tensor_data(batch, key="distillation_only", default=False)
         score_centering = tu.get_non_tensor_data(batch, key="score_centering", default=False)
-        if score_centering and use_fused_kernels:
-            raise ValueError("Score centering requires use_fused_kernels=False")
         pad_to_length_bucket = (
             self.engine_config.pad_to_length_bucket
             if self.engine_config.pad_to_length and self.engine_config.use_remove_padding
@@ -1327,6 +1325,12 @@ class MegatronEngineWithLMHead(MegatronEngine):
             from verl.models.mcore import get_mcore_forward_fused_model_engine_fn
 
             fused_forward_fn = get_mcore_forward_fused_model_engine_fn(self.model_config.hf_config)
+            sc_kwargs = {}
+            if score_centering:
+                sc_kwargs = {
+                    "score_centering": logits_processor_func,
+                    "rollout_topk": (batch["rollout_topk_ids"], batch["rollout_topk_log_probs"]),
+                }
             output = fused_forward_fn(
                 model=model,
                 input_ids=input_ids,
@@ -1340,6 +1344,7 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 router_padding_mask=router_padding_mask,
                 pad_to_length_bucket=pad_to_length_bucket,
                 position_ids=batch.get("position_ids", None),
+                **sc_kwargs,
             )
         else:
             if not isinstance(temperature, torch.Tensor):

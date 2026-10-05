@@ -26,6 +26,94 @@ import torch.distributed as dist
 from verl.trainer.ppo.score_centering import score_centering_residual, score_centering_weight_fn
 
 
+class _SelectedLogits(torch.autograd.Function):
+    """Project selected vocabulary rows without retaining [tokens, k, hidden].
+
+    The hidden gradient is TP-local, like the fused CE kernel. The caller's
+    sequence-parallel gather or copy-to-TP mapping reduces it in backward.
+    """
+
+    @staticmethod
+    def forward(
+        ctx: Any,
+        hidden: torch.Tensor,
+        weight: torch.Tensor,
+        ids: torch.Tensor,
+        temperature: float,
+        group: Any,
+        chunk_size: int,
+    ) -> torch.Tensor:
+        rank = dist.get_rank(group) if group is not None else 0
+        flat = hidden.reshape(-1, hidden.shape[-1])
+        local_ids = ids.long() - rank * weight.shape[0]
+        owned = (local_ids >= 0) & (local_ids < weight.shape[0])
+        local_ids = local_ids.clamp(0, weight.shape[0] - 1)
+        dtype = torch.float64 if hidden.dtype == torch.float64 else torch.float32
+        output = torch.empty(ids.shape, dtype=dtype, device=hidden.device)
+        for start in range(0, flat.shape[0], chunk_size):
+            end = start + chunk_size
+            selected = weight[local_ids[start:end]].to(dtype)
+            output[start:end] = (selected * flat[start:end, None, :].to(dtype)).sum(-1)
+        output *= owned
+        output /= temperature
+        if group is not None and dist.get_world_size(group) > 1:
+            dist.all_reduce(output, group=group)
+        ctx.save_for_backward(hidden, weight, local_ids, owned)
+        ctx.temperature, ctx.chunk_size = temperature, chunk_size
+        return output
+
+    @staticmethod
+    @torch.autograd.function.once_differentiable
+    def backward(ctx: Any, grad: torch.Tensor) -> tuple[Any, ...]:
+        hidden, weight, ids, owned = ctx.saved_tensors
+        flat = hidden.reshape(-1, hidden.shape[-1])
+        dh = torch.empty_like(flat)
+        # Repeated vocabulary IDs must accumulate in FP32, not model precision.
+        dw = torch.zeros(weight.shape, dtype=grad.dtype, device=weight.device)
+        for start in range(0, flat.shape[0], ctx.chunk_size):
+            end = start + ctx.chunk_size
+            g = grad[start:end] * owned[start:end] / ctx.temperature
+            selected = weight[ids[start:end]].to(grad.dtype)
+            dh[start:end] = (g[..., None] * selected).sum(1).to(hidden.dtype)
+            updates = g[..., None] * flat[start:end, None, :].to(grad.dtype)
+            dw.index_add_(0, ids[start:end].reshape(-1), updates.reshape(-1, weight.shape[-1]))
+        return dh.reshape_as(hidden), dw.to(weight.dtype), None, None, None, None
+
+
+def compute_fused_score_centering(
+    hidden: torch.Tensor,
+    weight: torch.Tensor,
+    labels: torch.Tensor,
+    sampled_log_probs: torch.Tensor,
+    ids: torch.Tensor,
+    log_q: torch.Tensor,
+    temperature: float,
+    correction: Any,
+    group: Any = None,
+    chunk_size: int = 128,
+) -> dict[str, torch.Tensor]:
+    """Reuse fused CE's normalization: log p(k) = z_k - z_y + log p(y).
+
+    Heads and labels must already follow the hidden states' local CP layout.
+    Only selected projections are materialized; the full vocabulary softmax
+    and its gradient remain in the existing fused linear CE kernel.
+    """
+    if chunk_size <= 0:
+        raise ValueError("Score centering chunk_size must be positive")
+    ids = ids.reshape(-1, ids.shape[-1])
+    log_q = log_q.reshape_as(ids)
+    selected_ids = torch.cat((ids, labels.reshape(-1, 1)), dim=-1)
+    selected = _SelectedLogits.apply(hidden, weight, selected_ids, temperature, group, chunk_size)
+    head = selected[:, :-1] - selected[:, -1:] + sampled_log_probs.reshape(-1, 1)
+    weight_fn = score_centering_weight_fn(correction.get("rollout_is"), correction.get("rollout_is_threshold", 2.0))
+    residual, q_mass, p_mass = score_centering_residual(head, log_q.to(head.dtype), weight_fn)
+    return {
+        "sc_correction": (residual * head).sum(-1).reshape_as(sampled_log_probs),
+        "sc_sampler_head_mass": q_mass.reshape_as(sampled_log_probs),
+        "sc_train_head_mass": p_mass.reshape_as(sampled_log_probs),
+    }
+
+
 class _VocabParallelPolicyOutputs(torch.autograd.Function):
     """Share one model-precision logits buffer across SC, logprob and entropy.
 

@@ -17,7 +17,7 @@
 import inspect
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
 
 import megatron.core as mcore
 import torch
@@ -26,7 +26,10 @@ from megatron.core.config_logger import has_config_logger_enabled, log_config_to
 from megatron.core.inference.contexts import BaseInferenceContext
 from megatron.core.models.gpt.gpt_model import GPTModel
 from megatron.core.packed_seq_params import PackedSeqParams
-from megatron.core.tensor_parallel.mappings import gather_from_sequence_parallel_region
+from megatron.core.tensor_parallel.mappings import (
+    copy_to_tensor_model_parallel_region,
+    gather_from_sequence_parallel_region,
+)
 from megatron.core.utils import deprecate_inference_params
 from packaging import version
 from torch import Tensor
@@ -100,6 +103,8 @@ class FusedOutputProcessorContext:
 
     temperature: float
     impl_backend: str = "triton"
+    score_centering: Callable | None = None
+    rollout_topk: tuple[Tensor, Tensor] | None = None
 
 
 def fused_output_processor(
@@ -127,6 +132,11 @@ def fused_output_processor(
 
     temperature = context.temperature
     hidden_states = _gather_fused_hidden_states(hidden_states, config.sequence_parallel, context.impl_backend)
+    if context.score_centering is not None and not config.sequence_parallel and context.impl_backend != "liger":
+        # Triton CE and sparse projections both return TP-local hidden gradients.
+        hidden_states = copy_to_tensor_model_parallel_region(
+            hidden_states, group=parallel_state.get_tensor_model_parallel_group()
+        )
     logprobs, entropy = linear_cross_entropy(
         hidden_states,
         weight,
@@ -136,6 +146,25 @@ def fused_output_processor(
         parallel_state.get_tensor_model_parallel_group(),
         impl_backend=context.impl_backend,
     )
+
+    if context.score_centering is not None:
+        sc_hidden_states = hidden_states
+        if context.impl_backend == "liger":
+            # Liger already reduces CE dHidden; reduce only the sparse projection contribution.
+            sc_hidden_states = copy_to_tensor_model_parallel_region(
+                hidden_states, group=parallel_state.get_tensor_model_parallel_group()
+            )
+        sc_outputs = context.score_centering(
+            student_hidden_states=sc_hidden_states,
+            student_output_weight=weight,
+            sampled_log_probs=logprobs,
+            score_centering_inputs=context.rollout_topk,
+            score_centering_labels=labels,
+            score_centering_temperature=temperature,
+            score_centering_group=parallel_state.get_tensor_model_parallel_group(),
+        )
+        for key, value in sc_outputs.items():
+            output[key] = value
 
     if has_config_logger_enabled(config):
         payload = OrderedDict(
@@ -284,6 +313,8 @@ def fused_forward_model_engine(vision_model: bool = False):
         router_padding_mask: Tensor | None = None,
         pad_to_length_bucket: int | None = None,
         position_ids: Tensor | None = None,
+        score_centering: Callable | None = None,
+        rollout_topk: tuple[Tensor, Tensor] | None = None,
     ):
         pre_process = unwrap_model(model).pre_process
         post_process = unwrap_model(model).post_process
@@ -335,6 +366,16 @@ def fused_forward_model_engine(vision_model: bool = False):
             local_cp_size=local_cp_size,
         )
         labels_rmpad = labels_rmpad.contiguous()
+        context = FusedOutputProcessorContext(temperature=temperature, impl_backend=get_fused_impl_backend(model))
+        if score_centering is not None:
+            if not _use_output_processor_hook(model):
+                raise ValueError("Fused score centering requires Megatron's output_processor hook")
+            if post_process:
+                context.score_centering = score_centering
+                context.rollout_topk = tuple(
+                    preprocess_thd_engine(value, pre_process=True, **thd_kwargs)[0].contiguous()
+                    for value in rollout_topk
+                )
         forward_kwargs = dict(
             input_ids=input_ids_rmpad,
             attention_mask=attention_mask,
@@ -344,14 +385,10 @@ def fused_forward_model_engine(vision_model: bool = False):
             **model_kwargs,
         )
         if _use_output_processor_hook(model):
-            impl_backend = get_fused_impl_backend(model)
             output_orig: CausalLMOutputForPPO = model(
                 **forward_kwargs,
                 output_processor=fused_output_processor,
-                output_processor_context=FusedOutputProcessorContext(
-                    temperature=temperature,
-                    impl_backend=impl_backend,
-                ),
+                output_processor_context=context,
             )
         else:
             impl_backend = get_fused_impl_backend(model)
@@ -378,6 +415,18 @@ def fused_forward_model_engine(vision_model: bool = False):
         )
 
         output = {"log_probs": log_probs}
+
+        if score_centering is not None:
+            for key in ("sc_correction", "sc_sampler_head_mass", "sc_train_head_mass"):
+                output[key] = postprocess_thd_engine(
+                    output_orig[key].reshape(1, -1),
+                    packed_seq_params,
+                    input_ids,
+                    input_ids.shape[0],
+                    post_process=post_process,
+                    cp_layout=cp_layout,
+                    local_cp_size=local_cp_size,
+                )
 
         if calculate_entropy:
             entropy = output_orig.entropy

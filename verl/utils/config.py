@@ -103,7 +103,6 @@ def _validate_megatron_score_centering_config(config: DictConfig) -> None:
         "actor rollout_rs=null": actor.policy_loss.rollout_correction.get("rollout_rs") is None,
         "rollout_is_batch_normalize=false": not correction.rollout_is_batch_normalize,
         "actor.policy_loss.loss_mode=bypass_mode": actor.policy_loss.get("loss_mode") == "bypass_mode",
-        "model.use_fused_kernels=false": not model.get("use_fused_kernels", False),
         "model.mtp.enable=false": not model.get("mtp", {}).get("enable", False),
         "rollout.name=vllm": rollout.name == "vllm",
         "rollout.calculate_log_probs=true": rollout.calculate_log_probs,
@@ -116,7 +115,6 @@ def _validate_megatron_score_centering_config(config: DictConfig) -> None:
         "rollout.top_k=-1": rollout.get("top_k", -1) == -1,
         "rollout.topk_log_probs>0": rollout.get("topk_log_probs", 0) > 0,
         "actor.calculate_sum_pi_squared=false": not actor.get("calculate_sum_pi_squared", False),
-        "actor.use_fused_kernels=false": not actor.get("use_fused_kernels", False),
         "megatron.score_centering_chunk_size>0": actor.get("megatron", {}).get("score_centering_chunk_size", 128) > 0,
     }
     engine = actor.get("megatron", {})

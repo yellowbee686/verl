@@ -299,7 +299,7 @@ Subtract the expected score under the sampler from every token's score
 - Requires `bypass_mode=True` and `loss_type="reinforce"` (raises `ValueError` otherwise)
 - Requires `rollout_is` to be `None` or `"token"` (raises `ValueError` for `"sequence"`) and `rollout_is_batch_normalize=False`
 - Requires `actor_rollout_ref.rollout.topk_log_probs > 0` (sampler top-k log-probs, vLLM only)
-- FSDP actor only; incompatible with `use_fused_kernels` and distillation; single-turn agent loop only
+- FSDP and v1 Megatron actors; incompatible with distillation; single-turn agent loop only. FSDP is incompatible with `use_fused_kernels`; Megatron supports both settings
 
 Score centering automatically tries to align with the actual sampling support. When the
 rollout provider verifies that the recorded head covers it, the trainer is normalized over
@@ -671,11 +671,11 @@ algorithm:
           score_centering: true
   ```
 
-- Set `actor_rollout_ref.actor.use_fused_kernels: false` (incompatible with fused kernels)
+- FSDP: set `actor_rollout_ref.actor.use_fused_kernels: false` (incompatible with fused kernels). Megatron also supports fused kernels; see below
 - v1 trainer (`trainer.use_v1: true`) with an FSDP or Megatron actor; single-turn agent loop only
 - Head payload: `8k` bytes per padded prompt+response position on the driver (`k=128`: 1 KB
   per position), plus one boolean completeness receipt per position
-- The trainer evaluates the head log-probs in chunks of 4096 positions, with an fp32 workspace of roughly `4096 × vocab × 4` bytes
+- The FSDP trainer evaluates the head log-probs in chunks of 4096 positions, with an fp32 workspace of roughly `4096 × vocab × 4` bytes
 - Metrics: `actor/sc_correction`, `actor/sc_sampler_head_mass`, `actor/sc_train_head_mass`,
   `actor/sc_support_aligned`, `actor/sc_sampler_tail_mass`, `actor/sc_support_unknown`.
   `sc_support_aligned` reports the fraction of response tokens with verified support alignment;
@@ -688,23 +688,30 @@ algorithm:
 
 Use `model_engine=megatron` with the same boolean `score_centering` flag, sampler
 `topk_log_probs`, bypass loss and actor-side correction mirror shown above. The
-Megatron engine computes centering, sampled log-probs and optional entropy
-jointly from TP-sharded logits. The head coefficients and loss are shared with
-FSDP; sampler and trainer data formats do not change.
+head coefficients and loss are shared with FSDP; sampler and trainer data
+formats do not change. Both kernel settings are supported:
 
-- Set both `actor_rollout_ref.model.use_fused_kernels=false` and
-  `actor_rollout_ref.actor.use_fused_kernels=false`.
-- `actor_rollout_ref.actor.megatron.score_centering_chunk_size` (default 128)
-  bounds the token rows in each FP32 vocabulary workspace. The full logits and
-  their gradient remain in model precision. This still materializes full logits;
-  it is not a fused LM-head implementation or a guarantee against OOM.
+- `actor_rollout_ref.model.use_fused_kernels=false`: the engine computes
+  centering, sampled log-probs and optional entropy jointly from TP-sharded
+  logits. `actor_rollout_ref.actor.megatron.score_centering_chunk_size`
+  (default 128) bounds the token rows in each FP32 vocabulary workspace. The
+  full logits and their gradient remain in model precision. This still
+  materializes full logits and is not a guarantee against OOM.
+- `actor_rollout_ref.model.use_fused_kernels=true`: requires Megatron's native
+  `output_processor` hook (verified against Core 0.19.2 / Bridge 0.6.2). Sampled
+  log-probs come from the existing fused linear CE, and only the sampler head
+  plus the sampled token are projected: `log p(k) = z_k - z_y + log p(y)`.
+  Projections are chunked by the same `score_centering_chunk_size`, recomputed
+  in backward, and accumulate repeated weight rows in FP32.
 - THD supports tensor parallelism and static context parallelism. BSHD is limited
   to CP=1, retaining the existing engine restriction for per-token loss.
 - Dynamic CP, `pad_to_length`, MTP, speculative rollout, `calculate_sum_pi_squared`,
   independent rejection sampling and legacy trainers are not enabled by this path.
-- CPU tests compare outputs and gradients with a dense reference, including two
-  Gloo TP ranks. Forward alignment tests use model/parallel-state doubles. GPU
-  Megatron training, peak memory and convergence require separate validation.
+- CPU tests compare outputs and gradients with a dense reference for both
+  kernel settings, including two Gloo TP ranks. Forward alignment tests use
+  model/parallel-state doubles; an optional CUDA test checks the fused linear CE
+  kernel against the dense reference. GPU Megatron training, peak memory and
+  convergence require separate validation.
 
 Example: [`run_qwen2_5_0_5b_score_centering_megatron.sh`](../../examples/rollout_correction/run_qwen2_5_0_5b_score_centering_megatron.sh).
 
