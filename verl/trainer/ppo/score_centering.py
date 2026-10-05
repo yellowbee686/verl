@@ -277,12 +277,16 @@ def score_centering_ppo_loss(
     score_centering_inputs: tuple[torch.Tensor, torch.Tensor] | None = None,
     score_centering_group: Any = None,
     score_centering_labels: torch.Tensor | None = None,
-    score_centering_temperature: torch.Tensor | None = None,
+    score_centering_temperature: torch.Tensor | float | None = None,
     calculate_entropy: bool = False,
+    student_hidden_states: torch.Tensor | None = None,
+    student_output_weight: torch.Tensor | None = None,
+    sampled_log_probs: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, dict[str, Any]] | dict[str, torch.Tensor]:
     """Actor loss function used both for the logits processor and the final policy loss.
+    - student_hidden_states is not None, reuse fused CE for the centering term.
     - student_logits is not None, compute the centering term in the logits processor.
-    - student_logits is None, compute the final policy loss.
+    - neither is provided, compute the final policy loss.
 
     Args:
         config: Actor configuration.
@@ -294,13 +298,31 @@ def score_centering_ppo_loss(
         score_centering_inputs: Megatron sampler heads already aligned to the local CP rows.
         score_centering_group: Megatron tensor parallel group.
         score_centering_labels: Sampled-token labels on the same rows.
-        score_centering_temperature: Per-row temperatures for the joint Megatron computation.
+        score_centering_temperature: Per-row temperatures, or a scalar for fused Megatron.
         calculate_entropy: Include entropy in the joint Megatron outputs.
+        student_hidden_states: Fused Megatron hidden states before the LM head.
+        student_output_weight: TP-local LM-head weight for selected projections.
+        sampled_log_probs: Fused CE output, including full-vocabulary normalization.
 
     Returns:
+        student_hidden_states is not None: fused centering outputs and head masses.
         student_logits is not None: dict from ``score_centering_logits_processor``.
-        student_logits is None: the (loss, metrics) tuple from ``ppo_loss``.
+        neither is provided: the (loss, metrics) tuple from ``ppo_loss``.
     """
+    if student_hidden_states is not None:
+        from verl.utils.megatron.score_centering import compute_fused_score_centering
+
+        return compute_fused_score_centering(
+            student_hidden_states,
+            student_output_weight,
+            score_centering_labels,
+            sampled_log_probs,
+            *score_centering_inputs,
+            score_centering_temperature,
+            config.policy_loss.rollout_correction,
+            score_centering_group,
+            chunk_size=config.megatron.get("score_centering_chunk_size", 128),
+        )
     if student_logits is not None and config.strategy == "megatron":
         from verl.utils.megatron.score_centering import compute_policy_outputs_from_logits
 
