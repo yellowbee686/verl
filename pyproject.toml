@@ -66,6 +66,7 @@ verl-core = [
     # Decoding needs FFmpeg's shared libs (`ffmpeg`, docker/Dockerfile.uv.cu130).
     "torchcodec",
     "cachetools",
+    "einops",
     "nvtx",
     "pytest",
     "pytest-asyncio",

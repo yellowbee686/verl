@@ -486,7 +486,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             omega_profiler_config = config.ref.get("profiler", {})
 
         profiler_config = omega_conf_to_dataclass(omega_profiler_config, dataclass_type=ProfilerConfig)
-        if omega_profiler_config.get("tool", None) in ["npu", "nsys", "torch", "torch_memory", "precision_debugger"]:
+        # Any configured tool gets its tool_config converted, not just verl's built-in ones:
+        # omega_conf_to_dataclass returns None for a missing/empty config, so a tool without a
+        # tool_config entry still works, and a plugin-supplied tool can name its own dataclass
+        # through `_target_`.
+        if omega_profiler_config.get("tool", None) is not None:
             tool_config = omega_conf_to_dataclass(
                 omega_profiler_config.get("tool_config", {}).get(omega_profiler_config.get("tool"))
             )
