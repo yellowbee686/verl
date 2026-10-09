@@ -337,6 +337,7 @@ jobs:
     env:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      MODEL_PATH: /root/.cache/models/Qwen/Qwen3.5-2B
       TRANSFORMERS_VERBOSITY: 'error'
     steps:
       - name: Check npu and CANN info
@@ -357,9 +358,6 @@ jobs:
       - name: Check final pip list
         run: |
           pip list
-      - name: Prepare weights
-        run: |
-          ln -s /root/.cache/models ~/models
       - name: Preprocess geo3k dataset
         run: |
           python examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/.cache/datasets/hiyouga/geometry3k
@@ -380,6 +378,7 @@ jobs:
     env:
       HF_ENDPOINT: "https://hf-mirror.com"
       HF_HUB_ENABLE_HF_TRANSFER: "0" # This is more stable
+      MODEL_PATH: /root/.cache/models/Qwen/Qwen3.5-2B
     steps:
       - name: Check npu and CANN info
         run: |
@@ -402,9 +401,6 @@ jobs:
       - name: Check final pip list
         run: |
           pip list
-      - name: Prepare weights
-        run: |
-          ln -s /root/.cache/models ~/models
       - name: Preprocess geo3k dataset
         run: |
           python examples/data_preprocess/geo3k.py --local_dataset_path ${HOME}/.cache/datasets/hiyouga/geometry3k
