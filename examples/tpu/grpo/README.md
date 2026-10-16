@@ -16,7 +16,7 @@ You need `gcloud`, `kubectl`, Docker with Buildx, the Ray CLI (`pip install "ray
 ```bash
 git clone https://github.com/verl-project/verl.git
 git clone https://github.com/verl-project/verl-hardware-plugin.git
-git -C verl-hardware-plugin checkout e5ab532ae41a582bd2e9183c5deaf2bd8876045f
+git -C verl-hardware-plugin checkout f5876f75b01bcbbe2bdfbcc020f6a9be11e71a32
 cd verl
 ```
 
@@ -88,7 +88,7 @@ ray job submit --working-dir . --runtime-env-json "$RUNTIME_ENV" -- bash example
 ray job submit --working-dir . --runtime-env-json "$RUNTIME_ENV" -- bash examples/tpu/grpo/run_qwen3_4b_torchtitan.sh
 ```
 
-The smoke test takes about 10 minutes. The 4B run needs about 10 minutes to start, then about 20-30 s per step (~25 s average over 100 steps). Follow a job with `ray job logs -f <JOB_ID>`.
+The smoke test takes about 10 minutes. The 4B run needs about 10 minutes to start, then about 18-27 s per step (~22 s average over 100 steps). Follow a job with `ray job logs -f <JOB_ID>`.
 
 The scripts take their settings from environment variables, e.g. `-- RAY_DATA_HOME=/data/<DIR> TOTAL_TRAINING_STEPS=5 bash examples/tpu/grpo/run_qwen3_4b_torchtitan.sh`, and pass extra arguments to `verl.trainer.main_ppo` as Hydra overrides.
 
