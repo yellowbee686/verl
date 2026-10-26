@@ -366,11 +366,6 @@ class MegatronEngine(BaseEngine):
             else:
                 provider_overrides["enable_routing_replay"] = True
 
-        if self._qat_enabled:
-            from megatron.bridge.models.gpt_provider import modelopt_transformer_layer_spec
-
-            provider.transformer_layer_spec = modelopt_transformer_layer_spec
-
         # Megatron-Bridge >= v0.5.0 provides apply_overrides_and_finalize.
         # Megatron-Bridge <  v0.5.0 does not, so we fall back to manual setattr + finalize.
         if hasattr(provider, "apply_overrides_and_finalize"):
